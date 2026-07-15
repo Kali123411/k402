@@ -37,7 +37,8 @@ class _RpcBackend:
     async def _rpc(self):
         kaspa = _require_kaspa()
         async with self._lock:
-            if self._client is None or not self._client.is_connected():
+            # RpcClient.is_connected is a property in kaspa>=2.0, not a method
+            if self._client is None or not self._client.is_connected:
                 if self.url:
                     self._client = kaspa.RpcClient(url=self.url)
                 else:
@@ -73,7 +74,7 @@ class _RpcBackend:
         return False
 
     async def close(self) -> None:
-        if self._client is not None and self._client.is_connected():
+        if self._client is not None and self._client.is_connected:
             await self._client.disconnect()
         self._client = None
 
