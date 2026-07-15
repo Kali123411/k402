@@ -1,0 +1,128 @@
+# Server side of k402: issue offers, verify payments, gate endpoints.
+#
+#   k402 = K402(address_provider=XpubAddressProvider(xpub),
+#               backend=NodeBackend("ws://127.0.0.1:17110"))  # PnnBackend() for dev
+#   app = FastAPI()
+#   k402.install(app)
+#
+#   @app.post("/summarize")
+#   async def summarize(req: Req, payment=Depends(k402.paid(sompi=1_500_000))):
+#       ...
+from __future__ import annotations
+
+import time
+from typing import Optional
+
+from .addresses import AddressProvider
+from .backend import ChainBackend
+from .schemes import (PAYMENT_HEADER, SCHEME_UTXO, FacilitatorFee, Offer,
+                      ProtocolError, UtxoOffer, new_payment_id,
+                      parse_payment_header, payment_required_body)
+from .store import MemoryStore, PaymentRecord, PaymentStore
+
+
+class PaymentRequired(Exception):
+    """Raised when a request must (re)pay. Carries the 402 body to send."""
+
+    def __init__(self, offers: list[Offer], reason: str = ""):
+        self.body = payment_required_body(offers)
+        if reason:
+            self.body["reason"] = reason
+        super().__init__(reason or "payment required")
+
+
+class K402:
+    def __init__(self, address_provider: AddressProvider, backend: ChainBackend,
+                 store: Optional[PaymentStore] = None, network: str = "mainnet",
+                 quote_ttl: int = 600,
+                 facilitator_fee: Optional[FacilitatorFee] = None,
+                 extra_offers: Optional[list[Offer]] = None):
+        self.address_provider = address_provider
+        self.backend = backend
+        self.store = store or MemoryStore()
+        self.network = network
+        self.quote_ttl = quote_ttl
+        self.facilitator_fee = facilitator_fee
+        self.extra_offers = extra_offers or []  # e.g. a SessionOffer
+
+    # -------------------------------------------------------------- protocol core
+    def create_offer(self, sompi: int, description: str = "") -> UtxoOffer:
+        payment_id = new_payment_id()
+        offer = UtxoOffer(
+            network=self.network,
+            amount_sompi=str(sompi),
+            pay_to=self.address_provider.next_address(payment_id),
+            payment_id=payment_id,
+            expires=int(time.time()) + self.quote_ttl,
+            description=description,
+            facilitator_fee=self.facilitator_fee,
+        )
+        self.store.create(PaymentRecord(
+            payment_id=payment_id, address=offer.pay_to,
+            amount_sompi=sompi, expires=offer.expires))
+        return offer
+
+    def _demand(self, sompi: int, description: str, reason: str = "") -> PaymentRequired:
+        return PaymentRequired(
+            [self.create_offer(sompi, description), *self.extra_offers], reason)
+
+    async def verify(self, header_value: str, sompi: int,
+                     description: str = "") -> PaymentRecord:
+        """Verify an X-K402-Payment header; returns the consumed PaymentRecord.
+        Raises PaymentRequired (with a fresh offer) on any failure."""
+        try:
+            scheme, txid, payment_id = parse_payment_header(header_value)
+        except ProtocolError as e:
+            raise self._demand(sompi, description, str(e))
+        if scheme != SCHEME_UTXO:
+            raise self._demand(sompi, description, f"unsupported scheme '{scheme}'")
+
+        rec = self.store.get(payment_id)
+        if rec is None:
+            raise self._demand(sompi, description, "unknown payment_id")
+        if rec.used:
+            raise self._demand(sompi, description, "payment_id already used")
+        if rec.expired:
+            raise self._demand(sompi, description, "quote expired")
+
+        received = await self.backend.address_received_sompi(rec.address)
+        if received < rec.amount_sompi:
+            raise self._demand(
+                sompi, description,
+                f"address has received {received} of {rec.amount_sompi} sompi "
+                f"(tx {txid} not accepted yet? retry in ~1s)")
+
+        if not self.store.mark_used(payment_id):  # lost the race to a parallel request
+            raise self._demand(sompi, description, "payment_id already used")
+        rec.used = True
+        rec.meta["txid"] = txid
+        return rec
+
+    # -------------------------------------------------------------- FastAPI glue
+    def paid(self, sompi: int, description: str = ""):
+        """FastAPI dependency: `payment = Depends(k402.paid(sompi=...))`."""
+        try:
+            from fastapi import Request
+        except ImportError as e:
+            raise ImportError("k402.paid() needs fastapi: pip install 'k402[server]'") from e
+
+        async def dependency(request) -> PaymentRecord:
+            header = request.headers.get(PAYMENT_HEADER)
+            if not header:
+                raise self._demand(sompi, description)
+            return await self.verify(header, sompi, description)
+
+        # `from __future__ import annotations` stringifies closure annotations,
+        # and FastAPI can't resolve "Request" from a function-local import —
+        # attach the real class so dependency injection sees it.
+        dependency.__annotations__["request"] = Request
+        return dependency
+
+    def install(self, app) -> None:
+        """Register the 402 exception handler so PaymentRequired renders as a
+        protocol-compliant HTTP 402 body (not FastAPI's {'detail': ...})."""
+        from fastapi.responses import JSONResponse
+
+        @app.exception_handler(PaymentRequired)
+        async def _handler(request, exc: PaymentRequired):
+            return JSONResponse(status_code=402, content=exc.body)

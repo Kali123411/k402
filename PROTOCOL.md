@@ -1,0 +1,134 @@
+# k402 protocol — v0.1
+
+**HTTP 402 payments on Kaspa.** An open convention any HTTP service can
+implement to charge KAS per call — no accounts, no API keys, no card rails.
+What [x402](https://www.x402.org/) is for EVM stablecoin payments, k402 is for
+Kaspa, whose ~1-second confirmations at 10 blocks/sec make direct, per-call,
+non-custodial payment practical without channels or invoices.
+
+This document is the protocol. It is intentionally small: one response body,
+one request header, and per-scheme verification rules. Anything not specified
+here (pricing, discovery, catalogs, dashboards) is a service concern, not a
+protocol concern.
+
+## 1. Flow
+
+1. Client calls a paid endpoint with no payment attached.
+2. Server responds `402 Payment Required` with an **offer body** (§2).
+3. Client satisfies one offered scheme (§4) and retries the request with a
+   **payment header** (§3) — or, for `kaspa-session`, an `X-Session` header.
+4. Server verifies (§5) and serves the request.
+
+## 2. The 402 offer body
+
+```json
+{
+  "k402": "0.1",
+  "accepts": [
+    {
+      "scheme": "kaspa-utxo",
+      "network": "mainnet",
+      "amount_sompi": "1500000",
+      "pay_to": "kaspa:qr...",
+      "payment_id": "p_8f3ab2c4...",
+      "expires": 1784074500,
+      "description": "summarize, ~150 words",
+      "finality": 1,
+      "facilitator_fee": { "sompi": "2000", "to": "kaspa:qq...", "by": "example.dev" }
+    },
+    { "scheme": "kaspa-session", "open": "/onboard/request" }
+  ],
+  "reason": "optional human-readable string when re-402ing a failed payment"
+}
+```
+
+Rules:
+
+- `k402` (required): protocol version. This document defines `"0.1"`.
+- `accepts` (required): one entry per acceptable scheme. Clients MUST ignore
+  entries whose `scheme` they do not recognize.
+- All amounts are **sompi, as strings of integers**. Float KAS never crosses
+  the wire. (1 KAS = 100,000,000 sompi.)
+- `pay_to` MUST be a **fresh address per payment_id** (see §5 for why).
+- `expires` (unix seconds): after this the server MAY refuse the quote and
+  MUST respond with a fresh 402 offer.
+- `finality` (optional, default 1): DAA-score depth the server requires before
+  serving. 1 means "accepted" (~1 s on mainnet).
+- `facilitator_fee` (optional): a transparent service fee the payer adds as a
+  second output. See §6.
+- `description`, `reason` (optional): human/agent-readable strings.
+
+## 3. The payment header
+
+```
+X-K402-Payment: kaspa-utxo <txid> <payment_id>
+```
+
+Three space-separated tokens: scheme, the id of the paying transaction, and
+the `payment_id` from the offer being satisfied.
+
+## 4. Schemes
+
+### `kaspa-utxo` — non-custodial per-call payment
+
+The client sends `amount_sompi` to `pay_to` on `network`, plus
+`facilitator_fee.sompi` to `facilitator_fee.to` if present, then retries with
+the payment header. Overpayment is the server's to keep; underpayment fails
+verification.
+
+### `kaspa-session` — prepaid metered balance
+
+The offer's `open` field is a URL (absolute or relative to the service) that
+mints `{"session": "...", "depositAddress": "kaspa:..."}`. The client funds
+the deposit address; confirmed deposits become spendable balance; subsequent
+requests carry `X-Session: <session>` and the server meters against the
+balance. Zero added latency per call; the merchant holds the float. Session
+lifecycle beyond `open` is service-defined.
+
+### `kaspa-channel` — reserved
+
+Covenant-based unidirectional payment channels (per-call granularity with
+zero per-call chain latency). Reserved for a future protocol version.
+
+## 5. Verification (`kaspa-utxo`)
+
+On receiving the payment header the server:
+
+1. Looks up `payment_id`. Unknown, already-used, or expired → fresh 402.
+2. Checks the chain: total sompi received by `pay_to` ≥ `amount_sompi`, at the
+   offer's `finality` depth. Because `pay_to` is fresh per payment, "balance of
+   the address" is the whole check — any node with a UTXO index can answer it,
+   and no transaction parsing or payload inspection is required.
+3. Atomically marks `payment_id` used (replay protection), then serves.
+
+A payment that has not yet landed is a normal race at 1-second block times:
+servers SHOULD answer with a 402 whose `reason` says so, and clients SHOULD
+retry for a few seconds before treating payment as failed.
+
+## 6. Fees
+
+**The protocol itself extracts no fee.** There is no protocol-level fee
+output, no routed settlement, no percentage. Payments go client → merchant.
+
+Services layered on the rail (facilitators, hosted checkouts, channel
+operators) MAY charge for their work by quoting `facilitator_fee` in offers
+they produce. The fee is a visible line item the client pays as an explicit
+extra output — never hidden in `amount_sompi`. Clients MUST count it toward
+any per-call spending guard they enforce.
+
+## 7. Security notes
+
+- **Merchants:** derive `pay_to` watch-only (xpub) — the web server should
+  never hold spending keys. Persist payment_ids durably; `mark used` must be
+  atomic under concurrency.
+- **Clients:** enforce a per-call spend ceiling before paying any offer;
+  treat `expires` as hard; never pay the same offer twice.
+- **Both:** amounts are integers end-to-end. A server MUST NOT serve on a
+  partial payment; a client SHOULD overpay dust rather than round down.
+
+## 8. Reference implementation
+
+`pip install k402` — Python client (`k402.Client`), FastAPI server middleware
+(`k402.K402`), watch-only xpub derivation, and chain verification via your own
+node or the community [Public Node Network](https://kaspa.aspectron.org/rpc/pnn.html)
+(dev/test). MIT-licensed; this spec may be implemented by anyone in anything.
