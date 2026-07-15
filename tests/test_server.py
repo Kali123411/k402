@@ -28,7 +28,7 @@ def rig():
     counter = iter(range(10_000))
     k402 = K402(
         address_provider=CallbackAddressProvider(lambda pid: f"kaspa:addr{next(counter)}"),
-        backend=backend, quote_ttl=600)
+        backend=backend, quote_ttl=600, min_payable_sompi=0)  # test flow mechanics below the floor
     app = FastAPI()
     k402.install(app)
 
@@ -120,3 +120,23 @@ def test_memory_store_single_use():
     store = MemoryStore()
     store.create(PaymentRecord("p_1", "kaspa:a", 500, int(time.time()) + 60))
     assert store.mark_used("p_1") and not store.mark_used("p_1")
+
+
+def test_utxo_offer_respects_min_payable_floor():
+    """kaspa-utxo offers must be >= 0.1 KAS (Kaspa anti-spam floor); sub-floor prices
+    are quoted at the floor so the payer can actually broadcast."""
+    from k402 import K402
+    from k402.addresses import CallbackAddressProvider
+
+    class FakeBackend:
+        async def address_received_sompi(self, a): return 0
+        async def close(self): pass
+
+    k = K402(address_provider=CallbackAddressProvider(lambda p: "kaspa:addr"),
+             backend=FakeBackend())
+    cheap = k.create_offer(500_000, "cheap call")        # 0.005 KAS requested
+    assert cheap.amount_sompi == "10000000"              # quoted at the 0.1 KAS floor
+    rich = k.create_offer(50_000_000, "big call")        # 0.5 KAS requested
+    assert rich.amount_sompi == "50000000"               # above floor, unchanged
+    # the stored record matches what's charged, so verification uses the floored amount
+    assert k.store.get(cheap.payment_id).amount_sompi == 10_000_000

@@ -1,6 +1,6 @@
 [project]
 name = "k402"
-version = "0.1.1"
+version = "0.1.2"
 description = "k402 — HTTP 402 payments on Kaspa. Protocol library: client, server middleware, and PNN-backed verification. No accounts, no API keys."
 readme = "README.md"
 requires-python = ">=3.10"

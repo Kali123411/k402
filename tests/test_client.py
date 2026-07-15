@@ -40,7 +40,7 @@ def live_server():
     backend = FakeBackend()
     counter = iter(range(10_000))
     k402 = K402(address_provider=CallbackAddressProvider(
-        lambda pid: f"kaspa:addr{next(counter)}"), backend=backend)
+        lambda pid: f"kaspa:addr{next(counter)}"), backend=backend, min_payable_sompi=0)
     app = FastAPI()
     k402.install(app)
 

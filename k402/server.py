@@ -31,12 +31,19 @@ class PaymentRequired(Exception):
         super().__init__(reason or "payment required")
 
 
+# Kaspa's anti-spam rule rejects transactions whose outputs fall below a dust/storage-mass
+# floor — in practice a payment output must be >= 0.1 KAS. A kaspa-utxo offer priced below
+# this is unpayable (the payer literally can't broadcast it), so we quote the floor instead.
+MIN_PAYABLE_SOMPI = 10_000_000  # 0.1 KAS
+
+
 class K402:
     def __init__(self, address_provider: AddressProvider, backend: ChainBackend,
                  store: Optional[PaymentStore] = None, network: str = "mainnet",
                  quote_ttl: int = 600,
                  facilitator_fee: Optional[FacilitatorFee] = None,
-                 extra_offers: Optional[list[Offer]] = None):
+                 extra_offers: Optional[list[Offer]] = None,
+                 min_payable_sompi: int = MIN_PAYABLE_SOMPI):
         self.address_provider = address_provider
         self.backend = backend
         self.store = store or MemoryStore()
@@ -44,13 +51,15 @@ class K402:
         self.quote_ttl = quote_ttl
         self.facilitator_fee = facilitator_fee
         self.extra_offers = extra_offers or []  # e.g. a SessionOffer
+        self.min_payable_sompi = min_payable_sompi
 
     # -------------------------------------------------------------- protocol core
     def create_offer(self, sompi: int, description: str = "") -> UtxoOffer:
         payment_id = new_payment_id()
+        charged = max(int(sompi), self.min_payable_sompi)  # never quote below the payable floor
         offer = UtxoOffer(
             network=self.network,
-            amount_sompi=str(sompi),
+            amount_sompi=str(charged),
             pay_to=self.address_provider.next_address(payment_id),
             payment_id=payment_id,
             expires=int(time.time()) + self.quote_ttl,
@@ -59,7 +68,7 @@ class K402:
         )
         self.store.create(PaymentRecord(
             payment_id=payment_id, address=offer.pay_to,
-            amount_sompi=sompi, expires=offer.expires))
+            amount_sompi=charged, expires=offer.expires))
         return offer
 
     def _demand(self, sompi: int, description: str, reason: str = "") -> PaymentRequired:

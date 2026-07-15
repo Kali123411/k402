@@ -49,6 +49,12 @@ Rules:
   entries whose `scheme` they do not recognize.
 - All amounts are **sompi, as strings of integers**. Float KAS never crosses
   the wire. (1 KAS = 100,000,000 sompi.)
+- `amount_sompi` for `kaspa-utxo` MUST be at least the network's minimum
+  payable output — on Kaspa mainnet the anti-spam / storage-mass rule makes
+  this **0.1 KAS (10,000,000 sompi)**. An offer below the floor is unpayable
+  (the payer cannot broadcast it), so a service pricing a call under the floor
+  MUST quote the floor. Sub-floor per-call pricing belongs on `kaspa-session`,
+  where many calls are metered against one funding transaction.
 - `pay_to` MUST be a **fresh address per payment_id** (see §5 for why).
 - `expires` (unix seconds): after this the server MAY refuse the quote and
   MUST respond with a fresh 402 offer.
