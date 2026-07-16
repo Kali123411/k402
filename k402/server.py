@@ -44,7 +44,8 @@ class K402:
                  facilitator_fee: Optional[FacilitatorFee] = None,
                  extra_offers: Optional[list[Offer]] = None,
                  min_payable_sompi: int = MIN_PAYABLE_SOMPI,
-                 coin: Optional[str] = None, decimals: int = 8):
+                 coin: Optional[str] = None, decimals: int = 8,
+                 capture_baseline: bool = True):
         self.address_provider = address_provider
         self.backend = backend
         self.store = store or MemoryStore()
@@ -57,6 +58,11 @@ class K402:
         # coin None -> emit kaspa-utxo offers. Verification is identical either way.
         self.coin = coin
         self.decimals = decimals
+        # capture_baseline queries the backend at offer time to snapshot already-received funds.
+        # Required for REUSED/static addresses (else standing balance auto-verifies). For
+        # FRESH-address-per-payment providers the baseline is always 0, so set False to skip the
+        # wasted round-trip and make offer creation instant.
+        self.capture_baseline = capture_baseline
 
     # -------------------------------------------------------------- protocol core
     async def create_offer(self, sompi: int, description: str = "") -> Offer:
@@ -68,7 +74,7 @@ class K402:
         charged = max(int(sompi), self.min_payable_sompi)  # never quote below the payable floor
         pay_to = self.address_provider.next_address(payment_id)
         expires = int(time.time()) + self.quote_ttl
-        baseline = await self.backend.address_received_sompi(pay_to)
+        baseline = await self.backend.address_received_sompi(pay_to) if self.capture_baseline else 0
         if self.coin is not None:
             offer: Offer = BlockbookOffer(
                 coin=self.coin, network=self.network, amount=str(charged),
