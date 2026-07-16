@@ -67,17 +67,20 @@ class SqliteStore:
         self._path = path
         self._local = threading.local()
         with self._conn() as c:
+            # amount_sompi/baseline are TEXT (not INTEGER): EVM wei exceeds SQLite's 64-bit INTEGER,
+            # and INTEGER *affinity* would coerce big numeric strings and lose precision.
             c.execute("""CREATE TABLE IF NOT EXISTS k402_payments (
                 payment_id TEXT PRIMARY KEY,
                 address TEXT NOT NULL,
-                amount_sompi INTEGER NOT NULL,
+                amount_sompi TEXT NOT NULL,
                 expires INTEGER NOT NULL,
                 used INTEGER NOT NULL DEFAULT 0,
                 meta TEXT NOT NULL DEFAULT '{}',
-                baseline INTEGER NOT NULL DEFAULT 0)""")
-            # migrate older dbs that predate the baseline column
+                baseline TEXT NOT NULL DEFAULT '0')""")
+            # migrate older dbs that predate the baseline column (its affinity is fine for UTXO-scale
+            # values; EVM rails use fresh dbs created with the TEXT schema above)
             if "baseline" not in {r[1] for r in c.execute("PRAGMA table_info(k402_payments)")}:
-                c.execute("ALTER TABLE k402_payments ADD COLUMN baseline INTEGER NOT NULL DEFAULT 0")
+                c.execute("ALTER TABLE k402_payments ADD COLUMN baseline TEXT NOT NULL DEFAULT '0'")
 
     def _conn(self) -> sqlite3.Connection:
         conn = getattr(self._local, "conn", None)
