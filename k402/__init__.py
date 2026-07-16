@@ -11,7 +11,7 @@ from .schemes import (K402_VERSION, PAYMENT_HEADER, SESSION_HEADER,
 from .server import K402, PaymentRequired
 from .store import MemoryStore, PaymentRecord, PaymentStore, SqliteStore
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 __all__ = [
     "K402", "Client", "PaymentRequired", "PaymentFailed",

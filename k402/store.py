@@ -88,11 +88,13 @@ class SqliteStore:
         return conn
 
     def create(self, record: PaymentRecord) -> None:
+        # amount and baseline are stored as TEXT: EVM wei (18 decimals) routinely exceeds SQLite's
+        # signed-64-bit INTEGER limit (9.2e18), so bind them as strings and parse back to int.
         self._conn().execute(
             "INSERT INTO k402_payments (payment_id, address, amount_sompi, expires, used, meta, baseline) "
             "VALUES (?,?,?,?,?,?,?)",
-            (record.payment_id, record.address, record.amount_sompi,
-             record.expires, int(record.used), json.dumps(record.meta), record.baseline))
+            (record.payment_id, record.address, str(record.amount_sompi),
+             record.expires, int(record.used), json.dumps(record.meta), str(record.baseline)))
 
     def get(self, payment_id: str) -> Optional[PaymentRecord]:
         row = self._conn().execute(
@@ -100,9 +102,9 @@ class SqliteStore:
             "FROM k402_payments WHERE payment_id=?", (payment_id,)).fetchone()
         if row is None:
             return None
-        return PaymentRecord(payment_id=row[0], address=row[1], amount_sompi=row[2],
+        return PaymentRecord(payment_id=row[0], address=row[1], amount_sompi=int(row[2]),
                              expires=row[3], used=bool(row[4]), meta=json.loads(row[5]),
-                             baseline=row[6])
+                             baseline=int(row[6]))
 
     def mark_used(self, payment_id: str) -> bool:
         cur = self._conn().execute(
