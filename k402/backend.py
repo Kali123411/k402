@@ -189,3 +189,37 @@ class EsploraBackend:
 
     async def close(self) -> None:
         await self._http.aclose()
+
+
+class BlockCypherBackend:
+    """Verifier via BlockCypher's free API for BTC/LTC/DOGE/DASH (coin codes: btc, ltc, doge, dash).
+    GET /v1/{coin}/{chain}/addrs/{addr}/balance -> total_received (atomic units). Handy where no
+    public Blockbook/Esplora exists (Dogecoin, Dash). Free tier is rate-limited (~200 req/hr,
+    3/sec); pass a token for higher limits. Watch-only."""
+
+    def __init__(self, coin: str, chain: str = "main", token: str = "",
+                 min_confirmations: int = 0, http: Optional[httpx.AsyncClient] = None,
+                 user_agent: str = "k402"):
+        self.base = f"https://api.blockcypher.com/v1/{coin}/{chain}"
+        self.token = token
+        self.min_confirmations = min_confirmations
+        self._http = http or httpx.AsyncClient(
+            timeout=30, follow_redirects=True, headers={"User-Agent": user_agent})
+
+    async def address_received_sompi(self, address: str) -> int:
+        params = {"token": self.token} if self.token else {}
+        r = await self._http.get(f"{self.base}/addrs/{address}/balance", params=params)
+        r.raise_for_status()
+        return int(r.json().get("total_received", 0) or 0)
+
+    async def wait_for_payment(self, address: str, amount_atomic: int,
+                               timeout: float = 120.0, poll: float = 5.0) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if await self.address_received_sompi(address) >= amount_atomic:
+                return True
+            await asyncio.sleep(poll)
+        return False
+
+    async def close(self) -> None:
+        await self._http.aclose()
