@@ -2,24 +2,25 @@
 from .addresses import (AddressProvider, Bip32AddressProvider, CallbackAddressProvider,
                         StaticAddressProvider, XpubAddressProvider)
 from .backend import (BlockbookBackend, BlockCypherBackend, ChainBackend, EsploraBackend,
-                      NodeBackend, PnnBackend)
+                      EvmBackend, NodeBackend, PnnBackend)
 from .client import Client, Payer, PaymentFailed
 from .schemes import (K402_VERSION, PAYMENT_HEADER, SESSION_HEADER,
-                      BlockbookOffer, FacilitatorFee, ProtocolError, SessionOffer,
+                      BlockbookOffer, EvmOffer, FacilitatorFee, ProtocolError, SessionOffer,
                       UtxoOffer, format_payment_header, parse_offers,
                       parse_payment_header, payment_required_body)
 from .server import K402, PaymentRequired
 from .store import MemoryStore, PaymentRecord, PaymentStore, SqliteStore
 
-__version__ = "0.4.2"
+__version__ = "0.5.0"
 
 __all__ = [
     "K402", "Client", "PaymentRequired", "PaymentFailed",
-    "UtxoOffer", "SessionOffer", "BlockbookOffer", "FacilitatorFee", "ProtocolError",
+    "UtxoOffer", "SessionOffer", "BlockbookOffer", "EvmOffer", "FacilitatorFee", "ProtocolError",
     "parse_offers", "payment_required_body",
     "format_payment_header", "parse_payment_header",
     "PAYMENT_HEADER", "SESSION_HEADER", "K402_VERSION",
-    "PnnBackend", "NodeBackend", "BlockbookBackend", "EsploraBackend", "BlockCypherBackend", "ChainBackend",
+    "PnnBackend", "NodeBackend", "BlockbookBackend", "EsploraBackend", "BlockCypherBackend",
+    "EvmBackend", "ChainBackend",
     "AddressProvider", "XpubAddressProvider", "Bip32AddressProvider",
     "CallbackAddressProvider", "StaticAddressProvider",
     "PaymentStore", "MemoryStore", "SqliteStore", "PaymentRecord",

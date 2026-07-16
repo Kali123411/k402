@@ -191,6 +191,61 @@ class EsploraBackend:
         await self._http.aclose()
 
 
+class EvmBackend:
+    """Verifier for any EVM chain via JSON-RPC (Ethereum Classic, Ethereum, L2s…). Reads the
+    native balance (eth_getBalance) or an ERC-20 balance (eth_call balanceOf) for an address.
+    EVM has no "total received" — balance can go down — so verification MUST use the baseline
+    delta (K402 default): balance increased by >= amount since the offer. Watch-only.
+
+    EvmBackend("https://etc.rivet.link")            # native ETC
+    EvmBackend("https://...", token="0x...")        # an ERC-20 (e.g. USDC), amounts in its base units
+    """
+
+    def __init__(self, rpc_url: str, token: Optional[str] = None,
+                 http: Optional[httpx.AsyncClient] = None, user_agent: str = "k402"):
+        self.rpc = rpc_url
+        self.token = token
+        self._id = 0
+        self._http = http or httpx.AsyncClient(
+            timeout=30, follow_redirects=True, headers={"User-Agent": user_agent})
+
+    async def _call(self, method: str, params: list):
+        self._id += 1
+        r = await self._http.post(self.rpc, json={"jsonrpc": "2.0", "id": self._id,
+                                                  "method": method, "params": params})
+        r.raise_for_status()
+        d = r.json()
+        if d.get("error"):
+            raise RuntimeError(f"evm rpc {method}: {d['error']}")
+        return d["result"]
+
+    async def address_received_sompi(self, address: str) -> int:
+        """Current balance in base units (wei for native, token base units for ERC-20). Used with
+        the baseline delta, so 'received since the offer' = current - baseline."""
+        if self.token:
+            # balanceOf(address) selector 0x70a08231 + 32-byte-padded address
+            data = "0x70a08231" + address.lower().replace("0x", "").rjust(64, "0")
+            res = await self._call("eth_call", [{"to": self.token, "data": data}, "latest"])
+        else:
+            res = await self._call("eth_getBalance", [address, "latest"])
+        return int(res, 16)
+
+    async def chain_id(self) -> int:
+        return int(await self._call("eth_chainId", []), 16)
+
+    async def wait_for_payment(self, address: str, amount_atomic: int, baseline: int = 0,
+                               timeout: float = 120.0, poll: float = 4.0) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if (await self.address_received_sompi(address)) - baseline >= amount_atomic:
+                return True
+            await asyncio.sleep(poll)
+        return False
+
+    async def close(self) -> None:
+        await self._http.aclose()
+
+
 class BlockCypherBackend:
     """Verifier via BlockCypher's free API for BTC/LTC/DOGE/DASH (coin codes: btc, ltc, doge, dash).
     GET /v1/{coin}/{chain}/addrs/{addr}/balance -> total_received (atomic units). Handy where no

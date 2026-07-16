@@ -15,9 +15,9 @@ from typing import Optional
 
 from .addresses import AddressProvider
 from .backend import ChainBackend
-from .schemes import (PAYMENT_HEADER, SCHEME_BLOCKBOOK, SCHEME_UTXO, BlockbookOffer,
-                      FacilitatorFee, Offer, ProtocolError, UtxoOffer, new_payment_id,
-                      parse_payment_header, payment_required_body)
+from .schemes import (PAYMENT_HEADER, SCHEME_BLOCKBOOK, SCHEME_EVM, SCHEME_UTXO,
+                      BlockbookOffer, EvmOffer, FacilitatorFee, Offer, ProtocolError,
+                      UtxoOffer, new_payment_id, parse_payment_header, payment_required_body)
 from .store import MemoryStore, PaymentRecord, PaymentStore
 
 
@@ -45,7 +45,8 @@ class K402:
                  extra_offers: Optional[list[Offer]] = None,
                  min_payable_sompi: int = MIN_PAYABLE_SOMPI,
                  coin: Optional[str] = None, decimals: int = 8,
-                 capture_baseline: bool = True):
+                 capture_baseline: bool = True,
+                 evm: Optional[dict] = None):
         self.address_provider = address_provider
         self.backend = backend
         self.store = store or MemoryStore()
@@ -63,6 +64,9 @@ class K402:
         # FRESH-address-per-payment providers the baseline is always 0, so set False to skip the
         # wasted round-trip and make offer creation instant.
         self.capture_baseline = capture_baseline
+        # evm dict -> emit `evm` offers: {chain, chain_id, asset, decimals, token?(ERC-20 contract)}.
+        # EVM balance can decrease, so capture_baseline should stay True (delta verification).
+        self.evm = evm
 
     # -------------------------------------------------------------- protocol core
     async def create_offer(self, sompi: int, description: str = "") -> Offer:
@@ -75,8 +79,14 @@ class K402:
         pay_to = self.address_provider.next_address(payment_id)
         expires = int(time.time()) + self.quote_ttl
         baseline = await self.backend.address_received_sompi(pay_to) if self.capture_baseline else 0
-        if self.coin is not None:
-            offer: Offer = BlockbookOffer(
+        if self.evm is not None:
+            offer: Offer = EvmOffer(
+                chain=self.evm["chain"], chain_id=int(self.evm["chain_id"]), asset=self.evm["asset"],
+                amount=str(charged), decimals=int(self.evm.get("decimals", 18)), pay_to=pay_to,
+                payment_id=payment_id, expires=expires, token=self.evm.get("token"),
+                description=description, facilitator_fee=self.facilitator_fee)
+        elif self.coin is not None:
+            offer = BlockbookOffer(
                 coin=self.coin, network=self.network, amount=str(charged),
                 decimals=self.decimals, pay_to=pay_to, payment_id=payment_id,
                 expires=expires, description=description, facilitator_fee=self.facilitator_fee)
@@ -107,7 +117,8 @@ class K402:
             scheme, txid, payment_id = parse_payment_header(header_value)
         except ProtocolError as e:
             raise await self._demand(sompi, description, str(e))
-        expected_scheme = SCHEME_BLOCKBOOK if self.coin is not None else SCHEME_UTXO
+        expected_scheme = (SCHEME_EVM if self.evm is not None else
+                           SCHEME_BLOCKBOOK if self.coin is not None else SCHEME_UTXO)
         if scheme != expected_scheme:
             raise await self._demand(sompi, description, f"unsupported scheme '{scheme}'")
 

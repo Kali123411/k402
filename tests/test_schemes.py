@@ -78,3 +78,25 @@ def test_blockbook_float_amount_rejected():
     good["amount"] = "0.5"
     with _pytest.raises(ProtocolError):
         BlockbookOffer.from_dict(good)
+
+
+def test_evm_offer_roundtrip():
+    from k402 import EvmOffer, parse_offers, payment_required_body
+    native = EvmOffer(chain="ethereum-classic", chain_id=61, asset="ETC", amount="1000000000000000",
+                      decimals=18, pay_to="0xabc", payment_id="p_1", expires=1784161352)
+    token = EvmOffer(chain="ethereum", chain_id=1, asset="USDC", amount="1000", decimals=6,
+                     pay_to="0xdef", payment_id="p_2", expires=1, token="0xA0b8...USDC")
+    parsed = parse_offers(payment_required_body([native, token]))
+    assert [o.scheme for o in parsed] == ["evm", "evm"]
+    assert parsed[0] == native and parsed[0].token is None
+    assert parsed[1].token == "0xA0b8...USDC" and parsed[1].chain_id == 1
+
+
+def test_evm_float_amount_rejected():
+    from k402 import EvmOffer, ProtocolError
+    import pytest as _pytest
+    d = EvmOffer(chain="ethereum", chain_id=1, asset="ETH", amount="1", decimals=18,
+                 pay_to="0x1", payment_id="p", expires=1).to_dict()
+    d["amount"] = "0.5"
+    with _pytest.raises(ProtocolError):
+        EvmOffer.from_dict(d)

@@ -124,6 +124,40 @@ Because Bitcoin-family finality is minutes, not ~1s, a service selling cheap cal
 SHOULD prefer a session scheme or accept a documented number of confirmations
 (`finality`) — see §5.
 
+### `evm` — per-call payment on any EVM chain (native coin or ERC-20)
+
+Ethereum Classic, Ethereum, and every EVM L2, in the chain's native coin or an
+ERC-20 token (USDC, USDT, …). The offer:
+
+```json
+{
+  "scheme": "evm",
+  "chain": "ethereum-classic",
+  "chain_id": 61,
+  "asset": "ETC",
+  "amount": "1000000000000000",
+  "decimals": 18,
+  "pay_to": "0x...",
+  "payment_id": "p_...",
+  "expires": 1784161352,
+  "token": null
+}
+```
+
+- `chain_id` (required): the EVM network id (61 = Ethereum Classic, 1 = Ethereum).
+- `asset` / `decimals`: display symbol and base-units-per-whole (18 native, 6 for
+  USDC…).
+- `amount` (required): base units (wei / token units) as an integer string.
+- `token` (optional): an ERC-20 contract address; absent/null means the native
+  coin.
+
+The client sends `amount` of the asset to `pay_to` on the given chain, then
+retries with the payment header (scheme `evm`). **Verification is a balance
+delta** (§5): EVM has no cumulative "total received" and a balance can decrease,
+so the merchant snapshots `eth_getBalance` (native) or `balanceOf` (token) at
+offer time and requires it to have risen by `amount` — one JSON-RPC read, no
+event-log scanning. Finality is the chain's; L2s and ETC confirm in seconds.
+
 ### `kaspa-channel` — reserved
 
 Covenant-based unidirectional payment channels (per-call granularity with

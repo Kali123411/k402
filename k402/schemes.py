@@ -14,6 +14,7 @@ SESSION_HEADER = "X-Session"
 SCHEME_UTXO = "kaspa-utxo"
 SCHEME_SESSION = "kaspa-session"
 SCHEME_BLOCKBOOK = "blockbook-utxo"
+SCHEME_EVM = "evm"
 
 
 class ProtocolError(ValueError):
@@ -173,10 +174,70 @@ class BlockbookOffer:
         return total
 
 
-Offer = UtxoOffer | SessionOffer | BlockbookOffer
+@dataclass
+class EvmOffer:
+    """evm: per-call payment on any EVM chain (Ethereum Classic, Ethereum, L2s…) in the native coin
+    or an ERC-20 token. `chain_id` identifies the network; `token` is None for the native coin or an
+    ERC-20 contract address. Verification is a balance delta since the offer (see PROTOCOL.md §5):
+    the merchant reads eth_getBalance (native) or balanceOf (token) for pay_to."""
+    chain: str
+    chain_id: int
+    asset: str
+    amount: str          # wei / token base units, integer string
+    decimals: int
+    pay_to: str          # 0x address
+    payment_id: str
+    expires: int
+    token: Optional[str] = None   # ERC-20 contract; None = native coin
+    description: str = ""
+    finality: int = 1
+    facilitator_fee: Optional[FacilitatorFee] = None
+    scheme: str = field(default=SCHEME_EVM, init=False)
+
+    def to_dict(self) -> dict:
+        d: dict[str, Any] = {
+            "scheme": self.scheme, "chain": self.chain, "chain_id": self.chain_id,
+            "asset": self.asset, "amount": str(self.amount), "decimals": self.decimals,
+            "pay_to": self.pay_to, "payment_id": self.payment_id, "expires": self.expires,
+        }
+        if self.token:
+            d["token"] = self.token
+        if self.description:
+            d["description"] = self.description
+        if self.finality != 1:
+            d["finality"] = self.finality
+        if self.facilitator_fee:
+            d["facilitator_fee"] = self.facilitator_fee.to_dict()
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "EvmOffer":
+        try:
+            amount = str(d["amount"])
+            int(amount)  # base units, integer string
+            return cls(
+                chain=d["chain"], chain_id=int(d["chain_id"]), asset=d["asset"], amount=amount,
+                decimals=int(d["decimals"]), pay_to=d["pay_to"], payment_id=d["payment_id"],
+                expires=int(d["expires"]), token=d.get("token"),
+                description=d.get("description", ""), finality=int(d.get("finality", 1)),
+                facilitator_fee=FacilitatorFee.from_dict(d["facilitator_fee"])
+                if d.get("facilitator_fee") else None,
+            )
+        except (KeyError, TypeError, ValueError) as e:
+            raise ProtocolError(f"invalid evm offer: {e}") from e
+
+    @property
+    def total_atomic(self) -> int:
+        total = int(self.amount)
+        if self.facilitator_fee:
+            total += int(self.facilitator_fee.sompi)
+        return total
+
+
+Offer = UtxoOffer | SessionOffer | BlockbookOffer | EvmOffer
 
 _SCHEME_TYPES = {SCHEME_UTXO: UtxoOffer, SCHEME_SESSION: SessionOffer,
-                 SCHEME_BLOCKBOOK: BlockbookOffer}
+                 SCHEME_BLOCKBOOK: BlockbookOffer, SCHEME_EVM: EvmOffer}
 
 
 def payment_required_body(offers: list[Offer]) -> dict:

@@ -209,3 +209,37 @@ def test_blockbook_coin_mode_flow():
             assert "unsupported scheme" in e.body["reason"]
 
     asyncio.run(run())
+
+
+def test_evm_mode_flow_and_baseline():
+    """K402(evm=...) emits evm offers; balance-delta verification blocks standing-balance bypass."""
+    import asyncio
+    from k402 import K402, format_payment_header, PaymentRequired
+    from k402.addresses import StaticAddressProvider
+
+    class FakeEvm:
+        def __init__(self, bal): self.bal = bal
+        async def address_received_sompi(self, a): return self.bal
+        async def close(self): pass
+
+    async def run():
+        be = FakeEvm(5 * 10**18)  # address already holds 5 ETC
+        k = K402(address_provider=StaticAddressProvider("0xcold"), backend=be, min_payable_sompi=0,
+                 evm={"chain": "ethereum-classic", "chain_id": 61, "asset": "ETC", "decimals": 18})
+        offer = await k.create_offer(10**15, "call")   # 0.001 ETC; baseline snapshots the 5 ETC
+        assert offer.scheme == "evm" and offer.chain_id == 61
+        hdr = format_payment_header("0xtx", offer.payment_id, scheme="evm")
+        try:
+            await k.verify(hdr, 10**15, "call"); assert False, "standing balance auto-verified"
+        except PaymentRequired as e:
+            assert "since the offer" in e.body["reason"]
+        be.bal += 10**15  # a real payment arrives
+        rec = await k.verify(hdr, 10**15, "call")
+        assert rec.meta["txid"] == "0xtx"
+        # a blockbook-utxo header is rejected in evm mode
+        try:
+            await k.verify("blockbook-utxo x p_y", 10**15, "call"); assert False
+        except PaymentRequired as e:
+            assert "unsupported scheme" in e.body["reason"]
+
+    asyncio.run(run())
