@@ -1,6 +1,6 @@
 [project]
 name = "k402"
-version = "0.3.0"
+version = "0.4.0"
 description = "k402 — HTTP 402 payments on Kaspa and Bitcoin-family UTXO chains. Protocol library: client, server middleware, and PNN-backed verification. No accounts, no API keys."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -16,8 +16,9 @@ dependencies = ["httpx>=0.27"]
 
 [project.optional-dependencies]
 kaspa = ["kaspa>=2.0"]
+btc = ["bip-utils>=2.9"]
 server = ["fastapi>=0.110"]
-all = ["kaspa>=2.0", "fastapi>=0.110"]
+all = ["kaspa>=2.0", "bip-utils>=2.9", "fastapi>=0.110"]
 
 [project.urls]
 Homepage = "https://github.com/Kali123411/k402"

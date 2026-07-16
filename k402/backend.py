@@ -154,3 +154,38 @@ class BlockbookBackend:
 
     async def close(self) -> None:
         await self._http.aclose()
+
+
+class EsploraBackend:
+    """Verifier for Bitcoin-family chains behind an Esplora/Blockstream-style API
+    (blockstream.info, mempool.space, litecoinspace.org, …). Asks GET /address/{addr}
+    for chain_stats.funded_txo_sum — the total atomic units received — the k402 primitive.
+    Watch-only; holds no keys. Base URL includes the /api prefix, e.g.
+    EsploraBackend("https://litecoinspace.org/api")."""
+
+    def __init__(self, base_url: str, min_confirmations: int = 0,
+                 http: Optional[httpx.AsyncClient] = None, user_agent: str = "k402"):
+        self.base = base_url.rstrip("/")
+        self.min_confirmations = min_confirmations
+        self._http = http or httpx.AsyncClient(
+            timeout=30, follow_redirects=True, headers={"User-Agent": user_agent})
+
+    async def address_received_sompi(self, address: str) -> int:
+        # chain_stats is confirmed-only (mempool_stats holds unconfirmed separately), so this is
+        # already 1+ confirmation. min_confirmations is accepted for interface parity; deeper
+        # finality would need per-tx confirmation checks.
+        r = await self._http.get(f"{self.base}/address/{address}")
+        r.raise_for_status()
+        return int(r.json().get("chain_stats", {}).get("funded_txo_sum", 0) or 0)
+
+    async def wait_for_payment(self, address: str, amount_atomic: int,
+                               timeout: float = 120.0, poll: float = 3.0) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if await self.address_received_sompi(address) >= amount_atomic:
+                return True
+            await asyncio.sleep(poll)
+        return False
+
+    async def close(self) -> None:
+        await self._http.aclose()
