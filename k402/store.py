@@ -18,6 +18,10 @@ class PaymentRecord:
     expires: int
     used: bool = False
     meta: dict = field(default_factory=dict)
+    # atomic units the address had already received when this offer was created. Verification
+    # requires (current received - baseline) >= amount, so a REUSED address's standing balance /
+    # history can never auto-satisfy an offer — only new funds paid after the offer count.
+    baseline: int = 0
 
     @property
     def expired(self) -> bool:
@@ -69,7 +73,11 @@ class SqliteStore:
                 amount_sompi INTEGER NOT NULL,
                 expires INTEGER NOT NULL,
                 used INTEGER NOT NULL DEFAULT 0,
-                meta TEXT NOT NULL DEFAULT '{}')""")
+                meta TEXT NOT NULL DEFAULT '{}',
+                baseline INTEGER NOT NULL DEFAULT 0)""")
+            # migrate older dbs that predate the baseline column
+            if "baseline" not in {r[1] for r in c.execute("PRAGMA table_info(k402_payments)")}:
+                c.execute("ALTER TABLE k402_payments ADD COLUMN baseline INTEGER NOT NULL DEFAULT 0")
 
     def _conn(self) -> sqlite3.Connection:
         conn = getattr(self._local, "conn", None)
@@ -81,18 +89,20 @@ class SqliteStore:
 
     def create(self, record: PaymentRecord) -> None:
         self._conn().execute(
-            "INSERT INTO k402_payments VALUES (?,?,?,?,?,?)",
+            "INSERT INTO k402_payments (payment_id, address, amount_sompi, expires, used, meta, baseline) "
+            "VALUES (?,?,?,?,?,?,?)",
             (record.payment_id, record.address, record.amount_sompi,
-             record.expires, int(record.used), json.dumps(record.meta)))
+             record.expires, int(record.used), json.dumps(record.meta), record.baseline))
 
     def get(self, payment_id: str) -> Optional[PaymentRecord]:
         row = self._conn().execute(
-            "SELECT payment_id, address, amount_sompi, expires, used, meta "
+            "SELECT payment_id, address, amount_sompi, expires, used, meta, baseline "
             "FROM k402_payments WHERE payment_id=?", (payment_id,)).fetchone()
         if row is None:
             return None
         return PaymentRecord(payment_id=row[0], address=row[1], amount_sompi=row[2],
-                             expires=row[3], used=bool(row[4]), meta=json.loads(row[5]))
+                             expires=row[3], used=bool(row[4]), meta=json.loads(row[5]),
+                             baseline=row[6])
 
     def mark_used(self, payment_id: str) -> bool:
         cur = self._conn().execute(

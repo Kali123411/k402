@@ -59,11 +59,16 @@ class K402:
         self.decimals = decimals
 
     # -------------------------------------------------------------- protocol core
-    def create_offer(self, sompi: int, description: str = "") -> Offer:
+    async def create_offer(self, sompi: int, description: str = "") -> Offer:
+        """Create an offer and snapshot the pay_to address's already-received amount as the
+        baseline, so verification only counts funds paid AFTER the offer. This is what makes a
+        reused address (a cold-wallet address, or Blockbook's monotonic totalReceived) safe:
+        its standing balance / history can never auto-satisfy an offer."""
         payment_id = new_payment_id()
         charged = max(int(sompi), self.min_payable_sompi)  # never quote below the payable floor
         pay_to = self.address_provider.next_address(payment_id)
         expires = int(time.time()) + self.quote_ttl
+        baseline = await self.backend.address_received_sompi(pay_to)
         if self.coin is not None:
             offer: Offer = BlockbookOffer(
                 coin=self.coin, network=self.network, amount=str(charged),
@@ -81,12 +86,12 @@ class K402:
             )
         self.store.create(PaymentRecord(
             payment_id=payment_id, address=offer.pay_to,
-            amount_sompi=charged, expires=offer.expires))
+            amount_sompi=charged, expires=offer.expires, baseline=baseline))
         return offer
 
-    def _demand(self, sompi: int, description: str, reason: str = "") -> PaymentRequired:
+    async def _demand(self, sompi: int, description: str, reason: str = "") -> PaymentRequired:
         return PaymentRequired(
-            [self.create_offer(sompi, description), *self.extra_offers], reason)
+            [await self.create_offer(sompi, description), *self.extra_offers], reason)
 
     async def verify(self, header_value: str, sompi: int,
                      description: str = "") -> PaymentRecord:
@@ -95,28 +100,29 @@ class K402:
         try:
             scheme, txid, payment_id = parse_payment_header(header_value)
         except ProtocolError as e:
-            raise self._demand(sompi, description, str(e))
+            raise await self._demand(sompi, description, str(e))
         expected_scheme = SCHEME_BLOCKBOOK if self.coin is not None else SCHEME_UTXO
         if scheme != expected_scheme:
-            raise self._demand(sompi, description, f"unsupported scheme '{scheme}'")
+            raise await self._demand(sompi, description, f"unsupported scheme '{scheme}'")
 
         rec = self.store.get(payment_id)
         if rec is None:
-            raise self._demand(sompi, description, "unknown payment_id")
+            raise await self._demand(sompi, description, "unknown payment_id")
         if rec.used:
-            raise self._demand(sompi, description, "payment_id already used")
+            raise await self._demand(sompi, description, "payment_id already used")
         if rec.expired:
-            raise self._demand(sompi, description, "quote expired")
+            raise await self._demand(sompi, description, "quote expired")
 
-        received = await self.backend.address_received_sompi(rec.address)
+        # count only funds received AFTER the offer (delta vs baseline), never standing history
+        received = await self.backend.address_received_sompi(rec.address) - rec.baseline
         if received < rec.amount_sompi:
-            raise self._demand(
+            raise await self._demand(
                 sompi, description,
-                f"address has received {received} of {rec.amount_sompi} sompi "
-                f"(tx {txid} not accepted yet? retry in ~1s)")
+                f"address has received {max(received, 0)} of {rec.amount_sompi} since the offer "
+                f"(tx {txid} not confirmed yet? retry shortly)")
 
         if not self.store.mark_used(payment_id):  # lost the race to a parallel request
-            raise self._demand(sompi, description, "payment_id already used")
+            raise await self._demand(sompi, description, "payment_id already used")
         rec.used = True
         rec.meta["txid"] = txid
         return rec
@@ -132,7 +138,7 @@ class K402:
         async def dependency(request) -> PaymentRecord:
             header = request.headers.get(PAYMENT_HEADER)
             if not header:
-                raise self._demand(sompi, description)
+                raise await self._demand(sompi, description)
             return await self.verify(header, sompi, description)
 
         # `from __future__ import annotations` stringifies closure annotations,

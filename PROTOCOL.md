@@ -134,10 +134,15 @@ zero per-call chain latency). Reserved for a future protocol version.
 On receiving the payment header the server:
 
 1. Looks up `payment_id`. Unknown, already-used, or expired → fresh 402.
-2. Checks the chain: total sompi received by `pay_to` ≥ `amount_sompi`, at the
-   offer's `finality` depth. Because `pay_to` is fresh per payment, "balance of
-   the address" is the whole check — any node with a UTXO index can answer it,
-   and no transaction parsing or payload inspection is required.
+2. Checks the chain: the amount received by `pay_to` **since the offer was
+   created** ≥ `amount_sompi`, at the offer's `finality` depth. The server
+   snapshots the address's already-received total when it issues the offer and
+   counts only the delta — so a **reused address's standing balance or history
+   can never auto-satisfy an offer** (critical when `pay_to` is a cold-wallet
+   address, or when the indexer reports a monotonic cumulative "total received").
+   Any node/indexer with an address query answers this; no transaction parsing
+   or payload inspection is required. Fresh-address-per-payment makes the
+   baseline zero and is still the most robust option under concurrency.
 3. Atomically marks `payment_id` used (replay protection), then serves.
 
 A payment that has not yet landed is a normal race at 1-second block times:

@@ -125,6 +125,7 @@ def test_memory_store_single_use():
 def test_utxo_offer_respects_min_payable_floor():
     """kaspa-utxo offers must be >= 0.1 KAS (Kaspa anti-spam floor); sub-floor prices
     are quoted at the floor so the payer can actually broadcast."""
+    import asyncio
     from k402 import K402
     from k402.addresses import CallbackAddressProvider
 
@@ -132,14 +133,45 @@ def test_utxo_offer_respects_min_payable_floor():
         async def address_received_sompi(self, a): return 0
         async def close(self): pass
 
-    k = K402(address_provider=CallbackAddressProvider(lambda p: "kaspa:addr"),
-             backend=FakeBackend())
-    cheap = k.create_offer(500_000, "cheap call")        # 0.005 KAS requested
-    assert cheap.amount_sompi == "10000000"              # quoted at the 0.1 KAS floor
-    rich = k.create_offer(50_000_000, "big call")        # 0.5 KAS requested
-    assert rich.amount_sompi == "50000000"               # above floor, unchanged
-    # the stored record matches what's charged, so verification uses the floored amount
-    assert k.store.get(cheap.payment_id).amount_sompi == 10_000_000
+    async def run():
+        k = K402(address_provider=CallbackAddressProvider(lambda p: "kaspa:addr"),
+                 backend=FakeBackend())
+        cheap = await k.create_offer(500_000, "cheap call")   # 0.005 KAS requested
+        assert cheap.amount_sompi == "10000000"               # quoted at the 0.1 KAS floor
+        rich = await k.create_offer(50_000_000, "big call")   # 0.5 KAS requested
+        assert rich.amount_sompi == "50000000"                # above floor, unchanged
+        assert k.store.get(cheap.payment_id).amount_sompi == 10_000_000
+    asyncio.run(run())
+
+
+def test_reused_address_standing_balance_does_not_auto_verify():
+    """SECURITY: a reused address with prior history/balance must NOT auto-satisfy new offers.
+    Verification counts only funds received AFTER the offer (delta vs baseline)."""
+    import asyncio
+    from k402 import K402, format_payment_header, PaymentRequired
+    from k402.addresses import StaticAddressProvider
+
+    class FakeBackend:
+        def __init__(self, standing): self.received = standing  # address already received a lot
+        async def address_received_sompi(self, a): return self.received
+        async def close(self): pass
+
+    async def run():
+        backend = FakeBackend(standing=5_000_000_000)  # address already has huge history
+        k = K402(address_provider=StaticAddressProvider("kaspa:reused"), backend=backend,
+                 min_payable_sompi=0)
+        offer = await k.create_offer(1000, "call")     # baseline snapshots the 5e9 standing
+        hdr = format_payment_header("anytxid", offer.payment_id)
+        # no NEW funds since the offer -> must NOT verify despite the huge standing balance
+        try:
+            await k.verify(hdr, 1000, "call"); assert False, "auto-verified against standing balance!"
+        except PaymentRequired as e:
+            assert "received 0 of 1000" in e.body["reason"]
+        # a real payment (standing + 1000) verifies
+        backend.received += 1000
+        rec = await k.verify(hdr, 1000, "call")
+        assert rec.meta["txid"] == "anytxid"
+    asyncio.run(run())
 
 
 def test_blockbook_coin_mode_flow():
@@ -160,7 +192,7 @@ def test_blockbook_coin_mode_flow():
         k = K402(address_provider=CallbackAddressProvider(lambda p: f"tprl1{next(counter)}"),
                  backend=backend, network="testnet", coin="pearl-testnet", decimals=8,
                  min_payable_sompi=100000)
-        offer = k.create_offer(500, "cheap")            # below floor -> quoted at floor
+        offer = await k.create_offer(500, "cheap")      # below floor -> quoted at floor
         assert offer.scheme == "blockbook-utxo" and offer.amount == "100000"
         backend.received[offer.pay_to] = 100000
         hdr = format_payment_header("tx1", offer.payment_id, scheme="blockbook-utxo")
