@@ -53,3 +53,28 @@ def test_header_roundtrip():
     assert parse_payment_header(hdr) == ("kaspa-utxo", "deadbeef", "p_abc123")
     with pytest.raises(ProtocolError):
         parse_payment_header("kaspa-utxo deadbeef")
+
+
+def test_blockbook_offer_roundtrip():
+    from k402 import BlockbookOffer, FacilitatorFee, parse_offers, payment_required_body
+    offer = BlockbookOffer(coin="pearl-testnet", network="testnet", amount="500000",
+                           decimals=8, pay_to="tprl1abc", payment_id="p_1", expires=1784161352,
+                           description="call",
+                           facilitator_fee=FacilitatorFee(sompi="1000", to="tprl1fee"))
+    body = payment_required_body([offer])
+    parsed = parse_offers(body)
+    assert len(parsed) == 1
+    o = parsed[0]
+    assert o.scheme == "blockbook-utxo" and o.coin == "pearl-testnet"
+    assert o == offer
+    assert o.total_atomic == 501000
+
+
+def test_blockbook_float_amount_rejected():
+    from k402 import BlockbookOffer, ProtocolError
+    import pytest as _pytest
+    good = BlockbookOffer(coin="litecoin", network="mainnet", amount="500000", decimals=8,
+                          pay_to="ltc1x", payment_id="p_2", expires=1).to_dict()
+    good["amount"] = "0.5"
+    with _pytest.raises(ProtocolError):
+        BlockbookOffer.from_dict(good)

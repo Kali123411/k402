@@ -13,6 +13,7 @@ SESSION_HEADER = "X-Session"
 
 SCHEME_UTXO = "kaspa-utxo"
 SCHEME_SESSION = "kaspa-session"
+SCHEME_BLOCKBOOK = "blockbook-utxo"
 
 
 class ProtocolError(ValueError):
@@ -116,9 +117,66 @@ class SessionOffer:
             raise ProtocolError(f"invalid kaspa-session offer: {e}") from e
 
 
-Offer = UtxoOffer | SessionOffer
+@dataclass
+class BlockbookOffer:
+    """blockbook-utxo: non-custodial per-call payment on any Bitcoin-family UTXO chain served by a
+    Blockbook indexer (Bitcoin, Litecoin, Dogecoin, Bitcoin Cash, Dash, transparent Zcash, Pearl…).
+    `coin` names the chain; `decimals` lets a client render the amount. Verification is the same as
+    kaspa-utxo — did `pay_to` receive >= amount — answered by Blockbook's address endpoint."""
+    coin: str
+    network: str
+    amount: str
+    decimals: int
+    pay_to: str
+    payment_id: str
+    expires: int
+    description: str = ""
+    finality: int = 1
+    facilitator_fee: Optional[FacilitatorFee] = None
+    scheme: str = field(default=SCHEME_BLOCKBOOK, init=False)
 
-_SCHEME_TYPES = {SCHEME_UTXO: UtxoOffer, SCHEME_SESSION: SessionOffer}
+    def to_dict(self) -> dict:
+        d: dict[str, Any] = {
+            "scheme": self.scheme, "coin": self.coin, "network": self.network,
+            "amount": str(self.amount), "decimals": self.decimals,
+            "pay_to": self.pay_to, "payment_id": self.payment_id, "expires": self.expires,
+        }
+        if self.description:
+            d["description"] = self.description
+        if self.finality != 1:
+            d["finality"] = self.finality
+        if self.facilitator_fee:
+            d["facilitator_fee"] = self.facilitator_fee.to_dict()
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "BlockbookOffer":
+        try:
+            amount = str(d["amount"])
+            int(amount)  # atomic units, integer string
+            return cls(
+                coin=d["coin"], network=d["network"], amount=amount,
+                decimals=int(d["decimals"]), pay_to=d["pay_to"], payment_id=d["payment_id"],
+                expires=int(d["expires"]), description=d.get("description", ""),
+                finality=int(d.get("finality", 1)),
+                facilitator_fee=FacilitatorFee.from_dict(d["facilitator_fee"])
+                if d.get("facilitator_fee") else None,
+            )
+        except (KeyError, TypeError, ValueError) as e:
+            raise ProtocolError(f"invalid blockbook-utxo offer: {e}") from e
+
+    @property
+    def total_atomic(self) -> int:
+        total = int(self.amount)
+        if self.facilitator_fee:
+            total += int(self.facilitator_fee.sompi)
+        return total
+
+
+Offer = UtxoOffer | SessionOffer | BlockbookOffer
+
+_SCHEME_TYPES = {SCHEME_UTXO: UtxoOffer, SCHEME_SESSION: SessionOffer,
+                 SCHEME_BLOCKBOOK: BlockbookOffer}
 
 
 def payment_required_body(offers: list[Offer]) -> dict:

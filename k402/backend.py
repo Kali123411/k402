@@ -1,14 +1,21 @@
-# Chain backends answer one question for the verifier: how many sompi has an
+# Chain backends answer one question for the verifier: how many atomic units has an
 # address received? Fresh-address-per-payment makes that equal to its balance.
 #
-# PnnBackend resolves a public node via the Kaspa Resolver (PNN,
+# PnnBackend resolves a public Kaspa node via the Kaspa Resolver (PNN,
 # https://kaspa.aspectron.org/rpc/pnn.html). PNN is dev/test-grade by its own
 # docs — point production at your own node with NodeBackend(url=...).
+# BlockbookBackend serves any Bitcoin-family UTXO chain behind a Blockbook indexer
+# (Bitcoin, Litecoin, Dogecoin, Bitcoin Cash, Dash, transparent Zcash, Pearl…).
+#
+# NOTE: the interface method is named `address_received_sompi` for historical reasons
+# (Kaspa's atomic unit); it returns atomic units in whatever chain the backend serves.
 from __future__ import annotations
 
 import asyncio
 import time
 from typing import Optional, Protocol
+
+import httpx
 
 
 class ChainBackend(Protocol):
@@ -91,3 +98,56 @@ class NodeBackend(_RpcBackend):
 
     def __init__(self, url: str, network: str = "mainnet"):
         super().__init__(network=network, url=url)
+
+
+class BlockbookBackend:
+    """Verifier for any Bitcoin-family UTXO chain served by a Blockbook indexer.
+
+    One adapter covers Bitcoin, Litecoin, Dogecoin, Bitcoin Cash, Dash, transparent Zcash,
+    Pearl, and any other coin Blockbook indexes — just pass its API base URL, e.g.
+    BlockbookBackend("https://blockbook.pearlresearch.ai"). Verification asks the indexer
+    "how much has this address received" via GET /api/v2/address/{addr} -> totalReceived
+    (atomic units), which is exactly the k402 primitive. Watch-only; holds no keys.
+    """
+
+    def __init__(self, base_url: str, min_confirmations: int = 0,
+                 http: Optional[httpx.AsyncClient] = None):
+        self.base = base_url.rstrip("/")
+        self.min_confirmations = min_confirmations
+        self._http = http or httpx.AsyncClient(timeout=30, follow_redirects=True)
+
+    async def _address(self, address: str) -> dict:
+        r = await self._http.get(f"{self.base}/api/v2/address/{address}",
+                                 params={"details": "basic"})
+        r.raise_for_status()
+        return r.json()
+
+    async def address_received_sompi(self, address: str) -> int:
+        """Total atomic units this address has ever received. With min_confirmations>0,
+        subtracts still-unconfirmed receipts so 0-conf payments don't count as final."""
+        d = await self._address(address)
+        received = int(d.get("totalReceived", 0) or 0)
+        if self.min_confirmations > 0:
+            # unconfirmedBalance is signed; a positive value is not-yet-confirmed inflow
+            unconf = int(d.get("unconfirmedBalance", 0) or 0)
+            if unconf > 0:
+                received -= unconf
+        return received
+
+    async def wait_for_payment(self, address: str, amount_atomic: int,
+                               timeout: float = 120.0, poll: float = 2.0) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if await self.address_received_sompi(address) >= amount_atomic:
+                return True
+            await asyncio.sleep(poll)
+        return False
+
+    async def status(self) -> dict:
+        """Blockbook + backend sync info (coin name, decimals, best height)."""
+        r = await self._http.get(f"{self.base}/api/v2")
+        r.raise_for_status()
+        return r.json()
+
+    async def close(self) -> None:
+        await self._http.aclose()

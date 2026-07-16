@@ -91,6 +91,39 @@ requests carry `X-Session: <session>` and the server meters against the
 balance. Zero added latency per call; the merchant holds the float. Session
 lifecycle beyond `open` is service-defined.
 
+### `blockbook-utxo` — non-custodial per-call payment on any Bitcoin-family chain
+
+The same model as `kaspa-utxo`, generalized to any transparent UTXO chain served
+by a [Blockbook](https://github.com/trezor/blockbook) indexer — Bitcoin, Litecoin,
+Dogecoin, Bitcoin Cash, Dash, transparent Zcash, Pearl, and others. The offer adds
+two fields:
+
+```json
+{
+  "scheme": "blockbook-utxo",
+  "coin": "pearl",
+  "network": "mainnet",
+  "amount": "500000",
+  "decimals": 8,
+  "pay_to": "prl1...",
+  "payment_id": "p_...",
+  "expires": 1784161352
+}
+```
+
+- `coin` (required): which chain — the merchant maps it to a Blockbook base URL.
+- `amount` (required): atomic units as an integer string (not `amount_sompi`).
+- `decimals` (required): atomic units per whole coin (8 for most Bitcoin-family
+  chains), so a client can render the amount.
+
+The client sends `amount` to `pay_to`, then retries with the payment header
+(scheme `blockbook-utxo`). **Verification is identical to `kaspa-utxo`** — did
+`pay_to` receive ≥ `amount` — answered by Blockbook's `GET /api/v2/address/{addr}`
+→ `totalReceived`. The same per-chain minimum-payable/dust floor applies (§2).
+Because Bitcoin-family finality is minutes, not ~1s, a service selling cheap calls
+SHOULD prefer a session scheme or accept a documented number of confirmations
+(`finality`) — see §5.
+
 ### `kaspa-channel` — reserved
 
 Covenant-based unidirectional payment channels (per-call granularity with

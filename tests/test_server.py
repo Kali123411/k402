@@ -140,3 +140,40 @@ def test_utxo_offer_respects_min_payable_floor():
     assert rich.amount_sompi == "50000000"               # above floor, unchanged
     # the stored record matches what's charged, so verification uses the floored amount
     assert k.store.get(cheap.payment_id).amount_sompi == 10_000_000
+
+
+def test_blockbook_coin_mode_flow():
+    """K402(coin=...) emits blockbook-utxo offers and verifies against a Blockbook-style backend
+    (received atomic units), with the same replay + floor semantics as the Kaspa path."""
+    import asyncio
+    from k402 import K402, format_payment_header, PaymentRequired
+    from k402.addresses import CallbackAddressProvider
+
+    class FakeBB:
+        def __init__(self): self.received = {}
+        async def address_received_sompi(self, a): return self.received.get(a, 0)
+        async def close(self): pass
+
+    async def run():
+        backend = FakeBB()
+        counter = iter(range(100))
+        k = K402(address_provider=CallbackAddressProvider(lambda p: f"tprl1{next(counter)}"),
+                 backend=backend, network="testnet", coin="pearl-testnet", decimals=8,
+                 min_payable_sompi=100000)
+        offer = k.create_offer(500, "cheap")            # below floor -> quoted at floor
+        assert offer.scheme == "blockbook-utxo" and offer.amount == "100000"
+        backend.received[offer.pay_to] = 100000
+        hdr = format_payment_header("tx1", offer.payment_id, scheme="blockbook-utxo")
+        rec = await k.verify(hdr, 500, "cheap")
+        assert rec.meta["txid"] == "tx1"
+        try:
+            await k.verify(hdr, 500, "cheap"); assert False
+        except PaymentRequired as e:
+            assert "already used" in e.body["reason"]
+        # a kaspa-utxo header is rejected in coin mode
+        try:
+            await k.verify("kaspa-utxo tx p_x", 500, "cheap"); assert False
+        except PaymentRequired as e:
+            assert "unsupported scheme" in e.body["reason"]
+
+    asyncio.run(run())

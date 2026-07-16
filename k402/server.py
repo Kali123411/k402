@@ -15,8 +15,8 @@ from typing import Optional
 
 from .addresses import AddressProvider
 from .backend import ChainBackend
-from .schemes import (PAYMENT_HEADER, SCHEME_UTXO, FacilitatorFee, Offer,
-                      ProtocolError, UtxoOffer, new_payment_id,
+from .schemes import (PAYMENT_HEADER, SCHEME_BLOCKBOOK, SCHEME_UTXO, BlockbookOffer,
+                      FacilitatorFee, Offer, ProtocolError, UtxoOffer, new_payment_id,
                       parse_payment_header, payment_required_body)
 from .store import MemoryStore, PaymentRecord, PaymentStore
 
@@ -43,7 +43,8 @@ class K402:
                  quote_ttl: int = 600,
                  facilitator_fee: Optional[FacilitatorFee] = None,
                  extra_offers: Optional[list[Offer]] = None,
-                 min_payable_sompi: int = MIN_PAYABLE_SOMPI):
+                 min_payable_sompi: int = MIN_PAYABLE_SOMPI,
+                 coin: Optional[str] = None, decimals: int = 8):
         self.address_provider = address_provider
         self.backend = backend
         self.store = store or MemoryStore()
@@ -52,20 +53,32 @@ class K402:
         self.facilitator_fee = facilitator_fee
         self.extra_offers = extra_offers or []  # e.g. a SessionOffer
         self.min_payable_sompi = min_payable_sompi
+        # coin set -> emit blockbook-utxo offers for that Bitcoin-family chain (Pearl, LTC, DOGE…);
+        # coin None -> emit kaspa-utxo offers. Verification is identical either way.
+        self.coin = coin
+        self.decimals = decimals
 
     # -------------------------------------------------------------- protocol core
-    def create_offer(self, sompi: int, description: str = "") -> UtxoOffer:
+    def create_offer(self, sompi: int, description: str = "") -> Offer:
         payment_id = new_payment_id()
         charged = max(int(sompi), self.min_payable_sompi)  # never quote below the payable floor
-        offer = UtxoOffer(
-            network=self.network,
-            amount_sompi=str(charged),
-            pay_to=self.address_provider.next_address(payment_id),
-            payment_id=payment_id,
-            expires=int(time.time()) + self.quote_ttl,
-            description=description,
-            facilitator_fee=self.facilitator_fee,
-        )
+        pay_to = self.address_provider.next_address(payment_id)
+        expires = int(time.time()) + self.quote_ttl
+        if self.coin is not None:
+            offer: Offer = BlockbookOffer(
+                coin=self.coin, network=self.network, amount=str(charged),
+                decimals=self.decimals, pay_to=pay_to, payment_id=payment_id,
+                expires=expires, description=description, facilitator_fee=self.facilitator_fee)
+        else:
+            offer = UtxoOffer(
+                network=self.network,
+                amount_sompi=str(charged),
+                pay_to=pay_to,
+                payment_id=payment_id,
+                expires=expires,
+                description=description,
+                facilitator_fee=self.facilitator_fee,
+            )
         self.store.create(PaymentRecord(
             payment_id=payment_id, address=offer.pay_to,
             amount_sompi=charged, expires=offer.expires))
@@ -83,7 +96,8 @@ class K402:
             scheme, txid, payment_id = parse_payment_header(header_value)
         except ProtocolError as e:
             raise self._demand(sompi, description, str(e))
-        if scheme != SCHEME_UTXO:
+        expected_scheme = SCHEME_BLOCKBOOK if self.coin is not None else SCHEME_UTXO
+        if scheme != expected_scheme:
             raise self._demand(sompi, description, f"unsupported scheme '{scheme}'")
 
         rec = self.store.get(payment_id)

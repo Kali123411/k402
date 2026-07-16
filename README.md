@@ -73,5 +73,5 @@ built on it (facilitators, hosted checkout) quote theirs as a transparent
 
 ## Status
 
-v0.1.0 — wire protocol stable enough to build against; API may move.
+v0.2.0 — wire protocol stable enough to build against; API may move.
 MIT license.
