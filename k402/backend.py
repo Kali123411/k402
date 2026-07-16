@@ -111,10 +111,13 @@ class BlockbookBackend:
     """
 
     def __init__(self, base_url: str, min_confirmations: int = 0,
-                 http: Optional[httpx.AsyncClient] = None):
+                 http: Optional[httpx.AsyncClient] = None, user_agent: str = "k402"):
         self.base = base_url.rstrip("/")
         self.min_confirmations = min_confirmations
-        self._http = http or httpx.AsyncClient(timeout=30, follow_redirects=True)
+        # public Blockbook instances (e.g. Trezor's) sit behind Cloudflare and 403 requests with
+        # no User-Agent, so always send one.
+        self._http = http or httpx.AsyncClient(
+            timeout=30, follow_redirects=True, headers={"User-Agent": user_agent})
 
     async def _address(self, address: str) -> dict:
         r = await self._http.get(f"{self.base}/api/v2/address/{address}",
