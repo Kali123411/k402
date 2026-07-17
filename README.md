@@ -55,6 +55,45 @@ included) without asking you.
 No wallet? Services may also offer `kaspa-session` (prepaid balance):
 `Client(session="s_...")`.
 
+## Ways to pay (schemes)
+
+A 402 offer lists one or more **schemes**; a client satisfies any one it
+understands. New to k402? Start with a session — it's the least moving parts.
+
+| Scheme | What it is | When to use |
+|---|---|---|
+| `kaspa-session` | Prepaid balance: fund one address, spend it down over many calls | Simplest. Best default for agents. Merchant holds the float. |
+| `kaspa-utxo` | One on-chain payment per call, to a fresh address | Non-custodial, no signup; pays ≥0.1 KAS/call (the mainnet output floor) |
+| `blockbook-utxo` / `evm` | The same, in BTC/LTC/DOGE/BCH/DASH or ETH/USDC/… | Paying in a coin you already hold |
+| `kaspa-channel` | **Covenant payment channel** — fund once, pay per call with off-chain vouchers, settle on L1 with no custodian | Many small calls, trustlessly; sub-cent granularity, zero per-call latency |
+
+### `kaspa-channel` — trustless per-call settlement
+
+A channel is a prepaid session made **trustless**: your KAS sits in a Kaspa L1
+covenant, not the merchant's wallet. You fund it once, then pay per call by
+signing a tiny **voucher** (a cumulative running total). The merchant can close
+on-chain at any time and consensus enforces the split — it can claim *at most
+what you signed*, to its own address, and you reclaim the rest. There's no
+facilitator and no sequencer; the only trusted party is Kaspa consensus.
+
+```python
+from k402.channel import sign_voucher, format_channel_header, payer_pubkey_from_privkey
+
+# 1. discover the merchant's channel terms from a 402 offer (scheme "kaspa-channel"):
+#    payee_pubkey, min/max channel size, required expiry, maxfee.
+# 2. compile + fund the channel covenant on-chain (payer = your key, payee from the offer),
+#    then register the outpoint at the offer's `open` URL -> you get a channel id.
+# 3. pay per call by signing a voucher for the new cumulative total and sending it as a header:
+total_sompi = 5_000_000                              # running sum you authorise so far
+voucher = sign_voucher(my_privkey_hex, channel_id, total_sompi)
+headers = {"X-K402-Payment": format_channel_header(channel_id, total_sompi, voucher)}
+# ...send `headers` with your request; the merchant verifies the voucher in microseconds and serves.
+```
+
+The voucher crypto is pure-Python (no native dependency) and is the normative
+reference for the scheme — see [PROTOCOL.md §4](PROTOCOL.md). The channel
+covenant (`channel.sil`) and its on-chain tooling live in the k402 repo.
+
 ## Chain backends
 
 | Backend | Use | Notes |
@@ -73,5 +112,8 @@ built on it (facilitators, hosted checkout) quote theirs as a transparent
 
 ## Status
 
-v0.5.0 — wire protocol stable enough to build against; API may move.
+v0.6.0 — protocol v0.2 adds the `kaspa-channel` scheme (covenant payment
+channels, proven live on Kaspa mainnet). Wire protocol stable enough to build
+against; the channel covenant is unaudited, so services cap channel sizes and
+mark it experimental. API may still move.
 MIT license.

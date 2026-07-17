@@ -1,0 +1,56 @@
+pragma silverscript ^0.1.0;
+
+// Channel — k402 `kaspa-channel`: a covenant-enforced UNIDIRECTIONAL PAYMENT CHANNEL. The payer
+// (agent) funds the channel once; per API call it hands the payee (service) an off-chain VOUCHER —
+// a bare BIP340 signature over sha256( channel_covenant_id(32) || cumulative_total(8, LE) ). The
+// payee serves instantly (no chain round-trip) and can close on-chain at any time with the LATEST
+// voucher; consensus enforces the exact split: `total` to the payee, the remainder back to the
+// payer, in one transaction. At/after expiry the payer reclaims everything unclaimed.
+//
+// Trust model: no custody (funds sit in this box, not the merchant's wallet); merchant theft is
+// bounded to exactly the signed total; payer default is impossible once a voucher is signed; the
+// only third party is Kaspa consensus. Two chain txs per channel regardless of call count.
+//
+//   close  — PAYEE presents the payer's voucher; outputs: [0] total -> payee, [1] rest -> payer.
+//   refund — PAYER reclaims everything at/after expiryDaa (payee never claimed).
+//
+// The voucher message embeds this box's covenant id (checked against OpInputCovenantId), so a
+// voucher can never replay against another channel — even between the same payer/payee pair.
+// PROTOTYPE — unaudited; mainnet use gated behind small channel caps.
+contract Channel(
+    pubkey payer,        // agent x-only pubkey: funds, signs vouchers, receives remainder/refund
+    pubkey payee,        // service x-only pubkey: verifies vouchers off-chain, authorizes close
+    int expiryDaa,       // at/after this DAA score the payer may refund
+    int maxFee,          // miner-fee headroom sourced from the box
+) {
+    int constant FLOOR = 20000000;   // remainder floor (KIP-9 storage mass; 0-value is invalid)
+
+    // PAYEE closes with the payer's latest off-chain voucher.
+    entrypoint function close(sig payeeSig, datasig voucher, byte[] voucherMsg) {
+        require(checkSig(payeeSig, payee));                          // the service authorizes the close tx
+        (byte[32] cidBin, byte[8] totalBin) = voucherMsg.split(32);  // msg = covenant_id || total(LE)
+        require(byte[](cidBin) == byte[](OpInputCovenantId(this.activeInputIndex)));  // THIS channel only
+        int total = int(totalBin);
+        require(total > 0);
+        require(checkSigFromStack(voucher, sha256(voucherMsg), payer));  // the payer signed this total
+        int remainder = tx.inputs[this.activeInputIndex].value - total - maxFee;
+        require(remainder >= FLOOR);                                 // open value must include the floor
+        require(tx.outputs.length == 2);
+        require(tx.outputs[0].value == total);                       // payee payout
+        byte[34] payeeLock = new ScriptPubKeyP2PK(payee);
+        require(tx.outputs[0].scriptPubKey == byte[](payeeLock));
+        require(tx.outputs[1].value == remainder);                   // remainder returns to the payer
+        byte[34] payerLock = new ScriptPubKeyP2PK(payer);
+        require(tx.outputs[1].scriptPubKey == byte[](payerLock));
+    }
+
+    // PAYER refunds everything at/after expiry (service didn't claim in time).
+    entrypoint function refund(sig payerSig) {
+        require(OpTxInputDaaScore(this.activeInputIndex) >= expiryDaa);
+        require(checkSig(payerSig, payer));
+        int payout = tx.inputs[this.activeInputIndex].value - maxFee;
+        require(tx.outputs[0].value == payout);
+        byte[34] lock = new ScriptPubKeyP2PK(payer);
+        require(tx.outputs[0].scriptPubKey == byte[](lock));
+    }
+}

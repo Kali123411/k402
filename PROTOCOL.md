@@ -1,4 +1,4 @@
-# k402 protocol — v0.1
+# k402 protocol — v0.2
 
 **HTTP 402 payments on Kaspa.** An open convention any HTTP service can
 implement to charge KAS per call — no accounts, no API keys, no card rails.
@@ -23,7 +23,7 @@ protocol concern.
 
 ```json
 {
-  "k402": "0.1",
+  "k402": "0.2",
   "accepts": [
     {
       "scheme": "kaspa-utxo",
@@ -44,7 +44,8 @@ protocol concern.
 
 Rules:
 
-- `k402` (required): protocol version. This document defines `"0.1"`.
+- `k402` (required): protocol version. This document defines `"0.2"` (adds the
+  `kaspa-channel` scheme §4; `"0.1"` clients simply skip offers they don't know).
 - `accepts` (required): one entry per acceptable scheme. Clients MUST ignore
   entries whose `scheme` they do not recognize.
 - All amounts are **sompi, as strings of integers**. Float KAS never crosses
@@ -158,10 +159,81 @@ so the merchant snapshots `eth_getBalance` (native) or `balanceOf` (token) at
 offer time and requires it to have risen by `amount` — one JSON-RPC read, no
 event-log scanning. Finality is the chain's; L2s and ETC confirm in seconds.
 
-### `kaspa-channel` — reserved
+### `kaspa-channel` — covenant-enforced payment channels
 
-Covenant-based unidirectional payment channels (per-call granularity with
-zero per-call chain latency). Reserved for a future protocol version.
+Covenant-based unidirectional payment channels: per-call granularity with **zero
+per-call chain latency and no custodian**. This is what a prepaid session is, made
+trustless — the merchant never holds the payer's float, and consensus (not a
+facilitator or a sequencer) enforces settlement. Two on-chain transactions per
+channel (open + close) regardless of how many calls flow through it.
+
+**The covenant.** The payer funds a channel covenant on `network`; the box's
+covenant id is the **channel id**. The covenant (`channel.sil`, ctor args
+`payer_pubkey, payee_pubkey, expiry_daa, maxfee_sompi`) admits two spends:
+
+- `close` — the payee presents the payer's latest voucher and consensus enforces
+  the split in one transaction: `total` to the payee (P2PK), the remainder back to
+  the payer (P2PK). Closing early or late cannot change the split.
+- `refund` — at/after `expiry_daa` the payer reclaims everything unclaimed.
+
+**The voucher.** Per call the payer signs a BIP340 schnorr signature over
+
+```
+sha256( channel_id (32 bytes) || cumulative_total_sompi (8 bytes, little-endian) )
+```
+
+`cumulative_total` is the running sum the payer authorizes the payee to claim so
+far — monotonically increasing, one voucher per call. The channel id inside the
+message binds the voucher to exactly one channel, so a voucher can never replay
+against another (even between the same payer/payee pair). A voucher is a bare
+64-byte signature: no chain interaction, no wallet round-trip.
+
+**The offer** (`accepts` entry):
+
+```json
+{
+  "scheme": "kaspa-channel",
+  "network": "mainnet",
+  "payee_pubkey": "<x-only hex>",
+  "price_sompi": "3000000",
+  "min_channel_sompi": "100000000",
+  "max_channel_sompi": "500000000",
+  "min_expiry_daa_delta": 864000,
+  "maxfee_sompi": "5000000",
+  "open": "/channel/open"
+}
+```
+
+The payer compiles the covenant with `(its pubkey, payee_pubkey, expiry, maxfee)`
+where `expiry >= current_daa + min_expiry_daa_delta`, funds it within the
+`min/max_channel_sompi` bounds, and registers the outpoint by POSTing
+`{payer_pubkey, expiry_daa, txid, index}` to `open`. The server independently
+recompiles with the same args and verifies on-chain: the P2SH address matches, the
+outpoint exists there with a covenant id, and the value is in bounds. `open`
+returns `{channel: <channel_id>, ...}`.
+
+**The payment header:**
+
+```
+X-K402-Payment: kaspa-channel <channel_id> <cumulative_total_sompi> <voucher_hex>
+```
+
+The server verifies (all in memory, ~microseconds — the per-call hot path): the
+channel is known and open; `cumulative_total - already_seen >= price`;
+`cumulative_total <= channel_value - maxfee - floor`; and the voucher BIP340-verifies
+against the payer key. Then it advances the channel's total and serves. The payee
+closes on-chain whenever it likes (typically as claimable value crosses a threshold
+or expiry nears); the payer's remainder returns in the same transaction.
+
+**Trust model.** No custody — funds sit in the covenant, not the merchant's wallet.
+A compromised payee key can claim **at most the exact total the payer already
+signed**, and only to the payee's own address. The payer cannot default once a
+voucher is signed, and reclaims everything unspent after expiry. The only trusted
+party is Kaspa consensus.
+
+Covenants require the Toccata consensus rules (mainnet-active). This scheme is
+marked experimental until the covenant is audited; services SHOULD cap
+`max_channel_sompi` conservatively.
 
 ## 5. Verification (`kaspa-utxo`)
 

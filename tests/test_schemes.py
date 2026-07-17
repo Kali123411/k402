@@ -31,7 +31,7 @@ def test_total_includes_facilitator_fee():
 
 def test_unknown_schemes_skipped():
     body = {"k402": "0.1", "accepts": [
-        {"scheme": "kaspa-channel", "whatever": 1},
+        {"scheme": "some-future-scheme", "whatever": 1},   # kaspa-channel is real as of 0.6.0
         SessionOffer(open="/o").to_dict(),
     ]}
     parsed = parse_offers(body)

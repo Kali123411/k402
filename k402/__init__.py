@@ -3,19 +3,25 @@ from .addresses import (AddressProvider, Bip32AddressProvider, CallbackAddressPr
                         StaticAddressProvider, XpubAddressProvider)
 from .backend import (BlockbookBackend, BlockCypherBackend, ChainBackend, EsploraBackend,
                       EvmBackend, NodeBackend, PnnBackend)
+from .channel import (SCHEME_CHANNEL, format_channel_header, parse_channel_header,
+                      payer_pubkey_from_privkey, sign_voucher, verify_voucher,
+                      voucher_digest, voucher_message)
 from .client import Client, Payer, PaymentFailed
 from .schemes import (K402_VERSION, PAYMENT_HEADER, SESSION_HEADER,
-                      BlockbookOffer, EvmOffer, FacilitatorFee, ProtocolError, SessionOffer,
-                      UtxoOffer, format_payment_header, parse_offers,
+                      BlockbookOffer, ChannelOffer, EvmOffer, FacilitatorFee, ProtocolError,
+                      SessionOffer, UtxoOffer, format_payment_header, parse_offers,
                       parse_payment_header, payment_required_body)
 from .server import K402, PaymentRequired
 from .store import MemoryStore, PaymentRecord, PaymentStore, SqliteStore
 
-__version__ = "0.5.2"
+__version__ = "0.6.0"
 
 __all__ = [
     "K402", "Client", "PaymentRequired", "PaymentFailed",
-    "UtxoOffer", "SessionOffer", "BlockbookOffer", "EvmOffer", "FacilitatorFee", "ProtocolError",
+    "UtxoOffer", "SessionOffer", "BlockbookOffer", "EvmOffer", "ChannelOffer",
+    "FacilitatorFee", "ProtocolError",
+    "SCHEME_CHANNEL", "voucher_message", "voucher_digest", "sign_voucher", "verify_voucher",
+    "format_channel_header", "parse_channel_header", "payer_pubkey_from_privkey",
     "parse_offers", "payment_required_body",
     "format_payment_header", "parse_payment_header",
     "PAYMENT_HEADER", "SESSION_HEADER", "K402_VERSION",

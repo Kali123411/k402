@@ -15,6 +15,7 @@ SCHEME_UTXO = "kaspa-utxo"
 SCHEME_SESSION = "kaspa-session"
 SCHEME_BLOCKBOOK = "blockbook-utxo"
 SCHEME_EVM = "evm"
+SCHEME_CHANNEL = "kaspa-channel"
 
 
 class ProtocolError(ValueError):
@@ -234,10 +235,58 @@ class EvmOffer:
         return total
 
 
-Offer = UtxoOffer | SessionOffer | BlockbookOffer | EvmOffer
+@dataclass
+class ChannelOffer:
+    """kaspa-channel: covenant-enforced unidirectional payment channel (PROTOCOL.md §4, 0.2).
+    The payer compiles the channel covenant with ctor args (its pubkey, payee_pubkey, an expiry
+    >= now + min_expiry_daa_delta, maxfee_sompi), funds it on `network` within the min/max bounds,
+    and registers the outpoint at `open`. Per call it signs a voucher over the cumulative total
+    (see k402.channel); the merchant verifies off-chain and can close on-chain with the latest."""
+    network: str
+    payee_pubkey: str            # x-only hex — the covenant's payee ctor arg
+    price_sompi: str             # per-call price metered against the channel
+    min_channel_sompi: str
+    max_channel_sompi: str
+    min_expiry_daa_delta: int    # payer must set expiry at least this far past the current DAA
+    maxfee_sompi: str            # the covenant's maxFee ctor arg (both sides must agree)
+    open: str                    # registration URL for a funded channel outpoint
+    description: str = ""
+    scheme: str = field(default=SCHEME_CHANNEL, init=False)
+
+    def to_dict(self) -> dict:
+        d: dict[str, Any] = {
+            "scheme": self.scheme, "network": self.network, "payee_pubkey": self.payee_pubkey,
+            "price_sompi": str(self.price_sompi), "min_channel_sompi": str(self.min_channel_sompi),
+            "max_channel_sompi": str(self.max_channel_sompi),
+            "min_expiry_daa_delta": self.min_expiry_daa_delta,
+            "maxfee_sompi": str(self.maxfee_sompi), "open": self.open,
+        }
+        if self.description:
+            d["description"] = self.description
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ChannelOffer":
+        try:
+            for k in ("price_sompi", "min_channel_sompi", "max_channel_sompi", "maxfee_sompi"):
+                int(str(d[k]))  # integer strings, never float KAS
+            return cls(
+                network=d["network"], payee_pubkey=d["payee_pubkey"],
+                price_sompi=str(d["price_sompi"]), min_channel_sompi=str(d["min_channel_sompi"]),
+                max_channel_sompi=str(d["max_channel_sompi"]),
+                min_expiry_daa_delta=int(d["min_expiry_daa_delta"]),
+                maxfee_sompi=str(d["maxfee_sompi"]), open=d["open"],
+                description=d.get("description", ""),
+            )
+        except (KeyError, TypeError, ValueError) as e:
+            raise ProtocolError(f"invalid kaspa-channel offer: {e}") from e
+
+
+Offer = UtxoOffer | SessionOffer | BlockbookOffer | EvmOffer | ChannelOffer
 
 _SCHEME_TYPES = {SCHEME_UTXO: UtxoOffer, SCHEME_SESSION: SessionOffer,
-                 SCHEME_BLOCKBOOK: BlockbookOffer, SCHEME_EVM: EvmOffer}
+                 SCHEME_BLOCKBOOK: BlockbookOffer, SCHEME_EVM: EvmOffer,
+                 SCHEME_CHANNEL: ChannelOffer}
 
 
 def payment_required_body(offers: list[Offer]) -> dict:
