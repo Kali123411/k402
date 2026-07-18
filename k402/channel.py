@@ -148,3 +148,44 @@ def payer_pubkey_from_privkey(payer_privkey_hex: str) -> str:
     if not (1 <= d <= _N - 1):
         raise ValueError("bad private key")
     return _point_mul(_G, d)[0].to_bytes(32, "big").hex()
+
+
+# --- generic BIP340 over arbitrary data (registry listings sign with the same key as vouchers) ---
+def sign_blob(privkey_hex: str, data: bytes) -> str:
+    """BIP340-sign sha256(data) with a key. Returns 64-byte signature hex."""
+    d0 = int.from_bytes(bytes.fromhex(privkey_hex), "big")
+    if not (1 <= d0 <= _N - 1):
+        raise ValueError("bad private key")
+    msg = hashlib.sha256(data).digest()
+    P = _point_mul(_G, d0)
+    d = d0 if P[1] % 2 == 0 else _N - d0
+    pk = P[0].to_bytes(32, "big")
+    aux = os.urandom(32)
+    t = (d ^ int.from_bytes(_tagged_hash("BIP0340/aux", aux), "big")).to_bytes(32, "big")
+    k0 = int.from_bytes(_tagged_hash("BIP0340/nonce", t + pk + msg), "big") % _N
+    if k0 == 0:
+        raise RuntimeError("nonce is zero")
+    R = _point_mul(_G, k0)
+    k = k0 if R[1] % 2 == 0 else _N - k0
+    r = R[0].to_bytes(32, "big")
+    e = int.from_bytes(_tagged_hash("BIP0340/challenge", r + pk + msg), "big") % _N
+    return (r + ((k + e * d) % _N).to_bytes(32, "big")).hex()
+
+
+def verify_blob(pubkey_hex: str, data: bytes, sig_hex: str) -> bool:
+    """BIP340-verify a signature over sha256(data) against an x-only pubkey."""
+    try:
+        pk = bytes.fromhex(pubkey_hex)
+        sig = bytes.fromhex(sig_hex)
+        if len(pk) != 32 or len(sig) != 64:
+            return False
+        msg = hashlib.sha256(data).digest()
+        P = _lift_x(int.from_bytes(pk, "big"))
+        r, s = int.from_bytes(sig[:32], "big"), int.from_bytes(sig[32:], "big")
+        if P is None or r >= _P or s >= _N:
+            return False
+        e = int.from_bytes(_tagged_hash("BIP0340/challenge", sig[:32] + pk + msg), "big") % _N
+        R = _point_add(_point_mul(_G, s), _point_mul((P[0], _P - P[1]), e))
+        return R is not None and R[1] % 2 == 0 and R[0] == r
+    except (ValueError, TypeError):
+        return False

@@ -101,9 +101,12 @@ class ChannelManager:
                  min_channel: int = 100_000_000, max_channel: int = 500_000_000,
                  maxfee: int = 5_000_000, min_expiry_delta: int = 864_000,
                  close_threshold: int = 100_000_000, close_margin_daa: int = 72_000,
-                 store_path: Optional[str] = None):
+                 store_path: Optional[str] = None, registry_url: Optional[str] = None):
         self.payee_privkey = payee_privkey
         self.payee_pubkey = payer_pubkey_from_privkey(payee_privkey)
+        # if set, each close is reported to this registry (which verifies it on-chain) so the
+        # provider's settled-volume reputation accrues automatically. Best-effort; never blocks a close.
+        self.registry_url = registry_url.rstrip("/") if registry_url else None
         self.backend = backend
         self.covenant = covenant
         self.network = network
@@ -237,7 +240,20 @@ class ChannelManager:
         with self._lock:
             self._chans[cid]["closed"] = txid
             self._save()
+        self._report_settled(txid)
         return txid
+
+    def _report_settled(self, close_txid: str) -> None:
+        """Best-effort: tell the registry about this close so reputation accrues. The registry
+        verifies it on-chain, so we don't need to prove anything here. Never raises."""
+        if not self.registry_url:
+            return
+        try:
+            import httpx
+            httpx.post(f"{self.registry_url}/registry/settled",
+                       json={"payee_pubkey": self.payee_pubkey, "close_txid": close_txid}, timeout=10)
+        except Exception:
+            pass
 
     async def maybe_close(self) -> list:
         """Close channels whose claimable value crosses the threshold or whose expiry nears.
