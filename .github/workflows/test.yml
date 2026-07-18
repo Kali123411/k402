@@ -17,6 +17,6 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install
-        run: pip install -e ".[server]" pytest uvicorn
+        run: pip install -e ".[server]" pytest pytest-asyncio uvicorn
       - name: Test
         run: pytest tests/ -q

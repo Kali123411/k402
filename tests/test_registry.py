@@ -63,12 +63,12 @@ def test_unsigned_listing_rejected():
 
 
 def test_reputation_from_verified_close_and_ranking():
+    PublicKey = pytest.importorskip("kaspa").PublicKey  # reputation verify derives the payee address
     be = FakeBackend()
     c = _app(be)
     # two providers, same capability; B will out-earn A on-chain and should rank first
     c.post("/registry/list", json=a_listing(A_PRIV, A_PUB, price=0.001).to_dict())
     c.post("/registry/list", json=a_listing(B_PRIV, B_PUB, price=0.005).to_dict())
-    from kaspa import PublicKey
     b_addr = str(PublicKey(B_PUB).to_address("mainnet"))
     be.utxo[b_addr] = [{"outpoint": {"transactionId": "ff" * 32, "index": 0},
                         "utxoEntry": {"amount": 500_000_000}}]  # B closed a 5 KAS settlement
@@ -85,6 +85,7 @@ def test_reputation_from_verified_close_and_ranking():
 
 
 def test_unverified_close_rejected():
+    pytest.importorskip("kaspa")  # settle path derives the payee address via the kaspa SDK
     c = _app(FakeBackend())  # no utxo -> close doesn't pay the payee
     c.post("/registry/list", json=a_listing(A_PRIV, A_PUB).to_dict())
     assert c.post("/registry/settled", json={"payee_pubkey": A_PUB, "close_txid": "ab" * 32}).status_code == 400
