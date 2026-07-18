@@ -15,6 +15,7 @@ from typing import Optional
 
 from .addresses import AddressProvider
 from .backend import ChainBackend
+from .channel import SCHEME_CHANNEL, parse_channel_header
 from .schemes import (PAYMENT_HEADER, SCHEME_BLOCKBOOK, SCHEME_EVM, SCHEME_UTXO,
                       BlockbookOffer, EvmOffer, FacilitatorFee, Offer, ProtocolError,
                       UtxoOffer, new_payment_id, parse_payment_header, payment_required_body)
@@ -46,7 +47,8 @@ class K402:
                  min_payable_sompi: int = MIN_PAYABLE_SOMPI,
                  coin: Optional[str] = None, decimals: int = 8,
                  capture_baseline: bool = True,
-                 evm: Optional[dict] = None):
+                 evm: Optional[dict] = None,
+                 channel_manager=None):
         self.address_provider = address_provider
         self.backend = backend
         self.store = store or MemoryStore()
@@ -67,6 +69,11 @@ class K402:
         # evm dict -> emit `evm` offers: {chain, chain_id, asset, decimals, token?(ERC-20 contract)}.
         # EVM balance can decrease, so capture_baseline should stay True (delta verification).
         self.evm = evm
+        # channel_manager set -> also accept kaspa-channel: a covenant payment channel the payer
+        # opened directly to THIS provider's payee key. The manager holds the key and settles on
+        # its own; k402 just routes the per-call voucher header to it. The channel offer is added
+        # to every 402 so payers can discover the terms.
+        self.channel_manager = channel_manager
 
     # -------------------------------------------------------------- protocol core
     async def create_offer(self, sompi: int, description: str = "") -> Offer:
@@ -106,13 +113,32 @@ class K402:
         return offer
 
     async def _demand(self, sompi: int, description: str, reason: str = "") -> PaymentRequired:
-        return PaymentRequired(
-            [await self.create_offer(sompi, description), *self.extra_offers], reason)
+        offers = [await self.create_offer(sompi, description), *self.extra_offers]
+        if self.channel_manager is not None:
+            offers.append(self.channel_manager.offer(max(int(sompi), 1)))
+        return PaymentRequired(offers, reason)
 
     async def verify(self, header_value: str, sompi: int,
                      description: str = "") -> PaymentRecord:
         """Verify an X-K402-Payment header; returns the consumed PaymentRecord.
         Raises PaymentRequired (with a fresh offer) on any failure."""
+        # kaspa-channel has a 4-token header (scheme, channel, total, voucher) and settles via the
+        # channel manager, not the address/payment_id flow — branch before the standard parse.
+        if self.channel_manager is not None and header_value.strip().startswith(SCHEME_CHANNEL + " "):
+            from .channel_server import ChannelError
+            try:
+                cid, total, voucher = parse_channel_header(header_value)
+            except ValueError as e:
+                raise await self._demand(sompi, description, str(e))
+            try:
+                self.channel_manager.charge(cid, int(sompi), total, voucher)
+            except ChannelError as e:
+                raise await self._demand(sompi, description, e.reason)
+            rec = PaymentRecord(payment_id=f"chan:{cid}", address=cid,
+                                amount_sompi=int(sompi), expires=0, baseline=0)
+            rec.used = True
+            rec.meta.update(scheme=SCHEME_CHANNEL, channel=cid, total=total)
+            return rec
         try:
             scheme, txid, payment_id = parse_payment_header(header_value)
         except ProtocolError as e:
@@ -166,9 +192,35 @@ class K402:
 
     def install(self, app) -> None:
         """Register the 402 exception handler so PaymentRequired renders as a
-        protocol-compliant HTTP 402 body (not FastAPI's {'detail': ...})."""
+        protocol-compliant HTTP 402 body (not FastAPI's {'detail': ...}). If a channel_manager
+        is attached, also mount the channel lifecycle routes (open/config/status) so a provider
+        accepts kaspa-channel with no extra wiring."""
+        from fastapi import Request
         from fastapi.responses import JSONResponse
 
         @app.exception_handler(PaymentRequired)
         async def _handler(request, exc: PaymentRequired):
             return JSONResponse(status_code=402, content=exc.body)
+
+        mgr = self.channel_manager
+        if mgr is None:
+            return
+
+        @app.get("/channel/config")
+        def _channel_config():
+            return mgr.offer(0).to_dict()
+
+        @app.post("/channel/open")
+        async def _channel_open(req: dict):
+            try:
+                return await mgr.verify_open(req["payer_pubkey"], int(req["expiry_daa"]),
+                                             req["txid"], int(req.get("index", 0)))
+            except KeyError as e:
+                return JSONResponse({"error": f"missing field {e}"}, status_code=400)
+            except ValueError as e:
+                return JSONResponse({"error": str(e)}, status_code=400)
+
+        @app.get("/channel/{cid}")
+        def _channel_status(cid: str):
+            st = mgr.status(cid)
+            return st if st else JSONResponse({"error": "unknown channel"}, status_code=404)

@@ -64,6 +64,12 @@ class _RpcBackend:
         resp = await rpc.get_utxos_by_addresses({"addresses": [address]})
         return resp["entries"]
 
+    async def daa_score(self) -> int:
+        """Current virtual DAA score — used to sanity-check channel expiries at open time."""
+        rpc = await self._rpc()
+        resp = await rpc.get_block_dag_info()
+        return int(resp.get("virtualDaaScore") or resp["virtual_daa_score"])
+
     async def submit_transaction(self, pending) -> str:
         rpc = await self._rpc()
         return await pending.submit(rpc)
