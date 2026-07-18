@@ -5,7 +5,7 @@ accounts, no API keys, no card rails. Kaspa confirms in ~1 second, so a
 non-custodial payment adds about a second to the first request and nothing
 after that.
 
-The wire protocol is [PROTOCOL.md](PROTOCOL.md) — one 402 body, one header,
+The wire protocol is [PROTOCOL.md](https://github.com/Kali123411/k402/blob/main/PROTOCOL.md) — one 402 body, one header,
 implementable in any language. This package is the Python reference
 implementation: client, FastAPI server middleware, and chain verification.
 
@@ -36,7 +36,42 @@ async def summarize(body: dict, payment=Depends(k402.paid(sompi=1_500_000))):
 ```
 
 Unpaid calls get a protocol 402 with a fresh payment address; paid calls run.
-Replay, expiry, and double-spend-of-the-quote are handled for you.
+Replay, expiry, and double-spend-of-the-quote are handled for you. That's a
+complete provider — your keys never touch the server. Full guide, including
+**trustless payment channels** and **listing on the service exchange**:
+[PROVIDERS.md](https://github.com/Kali123411/k402/blob/main/PROVIDERS.md).
+
+## Sell trustlessly: accept payment channels
+
+Let an agent lock KAS in a Kaspa L1 covenant and pay you per call with off-chain
+vouchers — you close on-chain when you like, and consensus enforces the split (you
+can claim at most what the agent signed, to your own address). No prepaid balance to
+custody, no facilitator.
+
+```python
+from k402 import K402, ChannelManager, SubprocessChannelCovenant, PnnBackend, XpubAddressProvider
+
+channels = ChannelManager(payee_privkey=MY_KEY, backend=PnnBackend(),
+                          covenant=SubprocessChannelCovenant(bin_path, cwd),
+                          registry_url="https://x402-compute.68cxgfyr0.workers.dev")
+k402 = K402(address_provider=XpubAddressProvider("kpub..."), backend=PnnBackend(),
+            channel_manager=channels)          # paid() endpoints now also take kaspa-channel
+k402.install(app)                              # + mounts /channel/open, /config, /{id}
+```
+
+## Get discovered: the service exchange
+
+An open marketplace of agent-payable services, settled trustlessly over channels —
+the registry never touches money. Publish a signed listing and agents find you;
+reputation is **chain-verified settled volume**. Browse it at
+[`/exchange`](https://x402-compute.68cxgfyr0.workers.dev/exchange).
+
+```python
+from k402 import Listing
+listing = Listing(capability="summarize", endpoint="https://you/summarize",
+                  payee_pubkey=MY_PUBKEY, price_usd=0.002).sign(MY_KEY)
+httpx.post("https://x402-compute.68cxgfyr0.workers.dev/registry/list", json=listing.to_dict())
+```
 
 ## Buy: a client that pays as it goes
 
@@ -91,7 +126,7 @@ headers = {"X-K402-Payment": format_channel_header(channel_id, total_sompi, vouc
 ```
 
 The voucher crypto is pure-Python (no native dependency) and is the normative
-reference for the scheme — see [PROTOCOL.md §4](PROTOCOL.md). The channel
+reference for the scheme — see [PROTOCOL.md §4](https://github.com/Kali123411/k402/blob/main/PROTOCOL.md). The channel
 covenant (`channel.sil`) and its on-chain tooling live in the k402 repo.
 
 ## Chain backends
@@ -112,8 +147,9 @@ built on it (facilitators, hosted checkout) quote theirs as a transparent
 
 ## Status
 
-v0.6.0 — protocol v0.2 adds the `kaspa-channel` scheme (covenant payment
-channels, proven live on Kaspa mainnet). Wire protocol stable enough to build
-against; the channel covenant is unaudited, so services cap channel sizes and
-mark it experimental. API may still move.
-MIT license.
+v0.7 — protocol v0.2 (`kaspa-channel` covenant payment channels, live on Kaspa
+mainnet) plus the **service exchange**: an open marketplace where providers list
+signed services and agents discover and settle with them directly over channels,
+reputation chain-verified, the registry never touching money. Wire protocol stable
+enough to build against; the channel covenant is unaudited, so channel sizes are
+capped and the scheme is experimental. API may still move. MIT license.
