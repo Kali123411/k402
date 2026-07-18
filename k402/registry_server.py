@@ -76,7 +76,11 @@ def create_registry_app(backend, network: str = "mainnet", db_path: str = "regis
             price_usd REAL NOT NULL, network TEXT NOT NULL, schemes TEXT NOT NULL,
             channel_terms TEXT NOT NULL, stake_outpoint TEXT, stake_sompi INTEGER DEFAULT 0,
             meta TEXT NOT NULL, listed_at INTEGER NOT NULL, sig TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (payee_pubkey, capability))""")
+        # migrate DBs created before the description column existed
+        if "description" not in {r[1] for r in _c.execute("PRAGMA table_info(listings)")}:
+            _c.execute("ALTER TABLE listings ADD COLUMN description TEXT NOT NULL DEFAULT ''")
         _c.execute("""CREATE TABLE IF NOT EXISTS reputation (
             payee_pubkey TEXT PRIMARY KEY, settled_sompi INTEGER NOT NULL DEFAULT 0,
             close_count INTEGER NOT NULL DEFAULT 0, first_settled INTEGER, last_settled INTEGER)""")
@@ -125,11 +129,11 @@ def create_registry_app(backend, network: str = "mainnet", db_path: str = "regis
                                     status_code=400)
             stake_sompi = v
         with _lock, db() as c:
-            c.execute("""INSERT OR REPLACE INTO listings VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            c.execute("""INSERT OR REPLACE INTO listings VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                       (listing.payee_pubkey, listing.capability, listing.endpoint, listing.price_usd,
                        listing.network, json.dumps(listing.schemes), json.dumps(listing.channel_terms),
                        listing.stake_outpoint, stake_sompi, json.dumps(listing.meta),
-                       listing.listed_at, listing.sig))
+                       listing.listed_at, listing.sig, listing.description))
         return {"ok": True, "payee_pubkey": listing.payee_pubkey, "capability": listing.capability,
                 "stake_sompi": stake_sompi}
 
@@ -171,6 +175,7 @@ def create_registry_app(backend, network: str = "mainnet", db_path: str = "regis
                 "network": r["network"], "schemes": json.loads(r["schemes"]),
                 "channel_terms": json.loads(r["channel_terms"]),
                 "stake_kas": round((r["stake_sompi"] or 0) / 1e8, 4),
+                "description": r.get("description", ""),
                 "meta": json.loads(r["meta"]), "listed_at": r["listed_at"], "reputation": rep})
         # rank: reputation (settled volume) desc, then price asc, then oldest listing (proven longer)
         out.sort(key=lambda x: (-x["reputation"]["settled_kas"], x["price_usd"], x["listed_at"]))
@@ -188,6 +193,7 @@ def create_registry_app(backend, network: str = "mainnet", db_path: str = "regis
                 "address": _payee_address(payee_pubkey, network),
                 "listings": [{"capability": r["capability"], "endpoint": r["endpoint"],
                               "price_usd": r["price_usd"], "meta": json.loads(r["meta"]),
+                              "description": r.get("description", ""),
                               "listed_at": r["listed_at"]} for r in rows]}
 
     # ---------------------------------------------------------------- reputation (verified closes)

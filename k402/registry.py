@@ -31,6 +31,7 @@ class Listing:
     channel_terms: dict = field(default_factory=dict)   # min/max_sompi, maxfee_sompi, min_expiry_daa_delta
     stake_outpoint: Optional[str] = None                # "txid:index" — optional skin-in-the-game
     meta: dict = field(default_factory=dict)            # model, region, latency_ms_p50, ...
+    description: str = ""                                # optional human blurb: what this service offers
     listed_at: int = 0
     sig: str = ""                                       # BIP340 over the canonical body by payee_pubkey
 
@@ -47,6 +48,10 @@ class Listing:
             "channel_terms": self.channel_terms, "stake_outpoint": self.stake_outpoint,
             "meta": self.meta, "listed_at": self.listed_at,
         }
+        # only include when set, so listings without a description keep the same canonical bytes
+        # (and signature) as before this field existed — backward-compatible.
+        if self.description:
+            d["description"] = self.description
         if self.sig:
             d["sig"] = self.sig
         return d
@@ -58,7 +63,8 @@ class Listing:
             price_usd=float(d["price_usd"]), network=d.get("network", "mainnet"),
             schemes=d.get("schemes", ["kaspa-channel", "kaspa-utxo"]),
             channel_terms=d.get("channel_terms", {}), stake_outpoint=d.get("stake_outpoint"),
-            meta=d.get("meta", {}), listed_at=int(d.get("listed_at", 0)), sig=d.get("sig", ""))
+            meta=d.get("meta", {}), description=d.get("description", ""),
+            listed_at=int(d.get("listed_at", 0)), sig=d.get("sig", ""))
 
     def sign(self, payee_privkey_hex: str) -> "Listing":
         """Sign in place with the payee key; stamps listed_at if unset. Verifies key match."""

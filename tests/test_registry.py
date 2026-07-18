@@ -42,6 +42,19 @@ def test_listing_sign_verify_roundtrip():
     assert not lst.verify()
 
 
+def test_description_signs_roundtrips_and_is_covered_by_signature():
+    lst = Listing(capability="summarize", endpoint="https://x/y", payee_pubkey=A_PUB, price_usd=0.002,
+                  network="mainnet", description="Fast 7B summariser, EU region.").sign(A_PRIV)
+    assert lst.verify()
+    r = Listing.from_dict(lst.to_dict())
+    assert r.description == "Fast 7B summariser, EU region." and r.verify()
+    # description is signed: tampering with it breaks the signature
+    r.description = "something else"
+    assert not r.verify()
+    # a description-less listing keeps the pre-field canonical (backward-compatible)
+    assert "description" not in a_listing(A_PRIV, A_PUB).to_dict()
+
+
 def test_wrong_key_signature_rejected():
     lst = Listing(capability="summarize", endpoint="https://x", payee_pubkey=A_PUB, price_usd=0.002)
     with pytest.raises(ValueError, match="does not match"):
