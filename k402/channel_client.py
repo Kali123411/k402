@@ -175,12 +175,14 @@ class ChannelPayer:
         return isinstance(body, dict) and "k402" in body
 
     @staticmethod
-    def _rank(providers: list, policy: str) -> list:
+    def rank(providers: list, policy: str = "registry") -> list:
+        """Order providers by `policy`: registry (trust the registry's reputation-then-price rank),
+        cheapest (price ascending), or reputation (settled volume descending)."""
         if policy == "cheapest":
             return sorted(providers, key=lambda p: p.get("price_usd", float("inf")))
         if policy == "reputation":
             return sorted(providers, key=lambda p: -((p.get("reputation") or {}).get("settled_kas", 0)))
-        return list(providers)  # 'registry' — trust the registry's rank (reputation, then price)
+        return list(providers)
 
     # -------- auto-route: discover, rank, pay the best, fail over --------
     async def pay_best(self, capability: str, path: str = "", json_body: Optional[dict] = None,
@@ -192,7 +194,7 @@ class ChannelPayer:
         error, up to `max_tries` paid attempts. Dead endpoints are skipped by preflight without
         opening a channel. Each provider is called at its own endpoint path unless `path` is given.
         Returns a RouteResult; raises RouteError if none succeed."""
-        providers = self._rank(
+        providers = self.rank(
             await self.discover(capability, max_price_usd=max_price_usd,
                                 min_reputation_kas=min_reputation_kas), policy)
         attempts: list = []
