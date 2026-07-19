@@ -73,6 +73,24 @@ listing = Listing(capability="summarize", endpoint="https://you/summarize",
 httpx.post("https://x402-compute.68cxgfyr0.workers.dev/registry/list", json=listing.to_dict())
 ```
 
+**Auto-route across providers.** On the agent side, `pay_best` discovers providers for a
+capability, ranks them (`registry` | `cheapest` | `reputation`), and pays the first that serves the
+call — **failing over** to the next on any error. A cheap preflight skips dead endpoints *before*
+opening a channel (which is an on-chain cost), so you never burn KAS on a provider that's down.
+
+```python
+from k402 import ChannelPayer, SubprocessChannelOpener, NodeBackend
+
+payer = ChannelPayer(payer_privkey=KEY, opener=SubprocessChannelOpener(bin, cwd),
+                     backend=NodeBackend("ws://your-node:17110"),
+                     registry_url="https://x402-compute.68cxgfyr0.workers.dev")
+
+res = await payer.pay_best("summarize", json_body={"text": "..."},
+                           policy="cheapest", max_price_usd=0.005, min_reputation_kas=1.0)
+print(res.response.json(), "served by", res.provider["payee_pubkey"][:8])
+# res.attempts lists any providers skipped/failed before this one. Raises RouteError if none serve.
+```
+
 ## Buy: a client that pays as it goes
 
 ```python

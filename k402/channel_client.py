@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from dataclasses import dataclass, field
 from typing import Optional, Protocol
 from urllib.parse import urlsplit
 
@@ -20,6 +21,23 @@ import httpx
 
 from .channel import (format_channel_header, payer_pubkey_from_privkey, sign_voucher)
 from .registry import RegistryClient
+
+
+@dataclass
+class RouteResult:
+    """A successful auto-route: the response, the provider that served it, and the providers
+    skipped/failed before it (payee_pubkey, reason)."""
+    response: httpx.Response
+    provider: dict
+    attempts: list = field(default_factory=list)
+
+
+class RouteError(RuntimeError):
+    """Raised by pay_best when no provider for a capability could serve the call."""
+    def __init__(self, capability: str, attempts: list):
+        self.capability, self.attempts = capability, attempts
+        detail = "; ".join(f"{p[:8]}…: {r}" for p, r in attempts) or "no providers found"
+        super().__init__(f"no provider for '{capability}' succeeded ({len(attempts)} tried): {detail}")
 
 
 class ChannelOpener(Protocol):
@@ -139,6 +157,64 @@ class ChannelPayer:
         if r.status_code == 402:      # roll back the local total so the next attempt re-signs cleanly
             ch["total"] -= price_sompi
         return r
+
+    # -------- preflight: is this endpoint a live k402 pay-gate? --------
+    async def preflight(self, provider: dict) -> bool:
+        """One cheap unpaid probe. Opening a channel is an on-chain cost, so pay_best checks a
+        provider is actually a live k402 gate (HTTP 402 with a k402 challenge) before committing."""
+        try:
+            r = await self.http.post(provider["endpoint"], json={})
+        except Exception:
+            return False
+        if r.status_code != 402:
+            return False
+        try:
+            body = r.json()
+        except Exception:
+            return False
+        return isinstance(body, dict) and "k402" in body
+
+    @staticmethod
+    def _rank(providers: list, policy: str) -> list:
+        if policy == "cheapest":
+            return sorted(providers, key=lambda p: p.get("price_usd", float("inf")))
+        if policy == "reputation":
+            return sorted(providers, key=lambda p: -((p.get("reputation") or {}).get("settled_kas", 0)))
+        return list(providers)  # 'registry' — trust the registry's rank (reputation, then price)
+
+    # -------- auto-route: discover, rank, pay the best, fail over --------
+    async def pay_best(self, capability: str, path: str = "", json_body: Optional[dict] = None,
+                       *, price_sompi: int = 3_000_000, policy: str = "registry", max_tries: int = 3,
+                       max_price_usd: Optional[float] = None, min_reputation_kas: float = 0.0,
+                       preflight: bool = True) -> RouteResult:
+        """Discover providers for `capability`, rank them by `policy` (registry | cheapest |
+        reputation), and pay the first that serves the call — failing over to the next on any
+        error, up to `max_tries` paid attempts. Dead endpoints are skipped by preflight without
+        opening a channel. Each provider is called at its own endpoint path unless `path` is given.
+        Returns a RouteResult; raises RouteError if none succeed."""
+        providers = self._rank(
+            await self.discover(capability, max_price_usd=max_price_usd,
+                                min_reputation_kas=min_reputation_kas), policy)
+        attempts: list = []
+        tries = 0
+        for provider in providers:
+            payee = provider.get("payee_pubkey", "?")
+            if preflight and not await self.preflight(provider):
+                attempts.append((payee, "preflight: not a live k402 endpoint"))
+                continue
+            p_path = path or (urlsplit(provider["endpoint"]).path or "/")
+            tries += 1
+            try:
+                r = await self.pay(provider, p_path, json_body, price_sompi=price_sompi)
+            except Exception as e:
+                attempts.append((payee, f"error: {e}"))
+            else:
+                if r.status_code < 400:
+                    return RouteResult(response=r, provider=provider, attempts=attempts)
+                attempts.append((payee, f"HTTP {r.status_code}"))
+            if tries >= max_tries:
+                break
+        raise RouteError(capability, attempts)
 
     async def aclose(self):
         await self.http.aclose()

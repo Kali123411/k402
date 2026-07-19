@@ -8,7 +8,8 @@ from .channel import (SCHEME_CHANNEL, format_channel_header, parse_channel_heade
                       voucher_digest, voucher_message)
 from .channel_server import (ChannelError, ChannelManager, ChannelCovenant,
                              SubprocessChannelCovenant)
-from .channel_client import ChannelOpener, ChannelPayer, SubprocessChannelOpener
+from .channel_client import (ChannelOpener, ChannelPayer, RouteError, RouteResult,
+                             SubprocessChannelOpener)
 from .client import Client, Payer, PaymentFailed
 from .registry import CAPABILITIES, Listing, RegistryClient
 from .schemes import (K402_VERSION, PAYMENT_HEADER, SESSION_HEADER,
@@ -28,7 +29,7 @@ __all__ = [
     "format_channel_header", "parse_channel_header", "payer_pubkey_from_privkey",
     "ChannelManager", "ChannelError", "ChannelCovenant", "SubprocessChannelCovenant",
     "Listing", "RegistryClient", "CAPABILITIES",
-    "ChannelPayer", "ChannelOpener", "SubprocessChannelOpener",
+    "ChannelPayer", "ChannelOpener", "SubprocessChannelOpener", "RouteResult", "RouteError",
     "parse_offers", "payment_required_body",
     "format_payment_header", "parse_payment_header",
     "PAYMENT_HEADER", "SESSION_HEADER", "K402_VERSION",
