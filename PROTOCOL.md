@@ -233,7 +233,10 @@ party is Kaspa consensus.
 
 Covenants require the Toccata consensus rules (mainnet-active). This scheme is
 marked experimental until the covenant is audited; services SHOULD cap
-`max_channel_sompi` conservatively.
+`max_channel_sompi` conservatively. See
+[CHANNEL-THREAT-MODEL.md](https://github.com/Kali123411/k402/blob/main/CHANNEL-THREAT-MODEL.md)
+for the full threat analysis and the covenant audit checklist. Conformance vectors for the voucher
+wire format are in `tests/vectors/channel_vouchers.json`.
 
 ## 5. Verification (`kaspa-utxo`)
 

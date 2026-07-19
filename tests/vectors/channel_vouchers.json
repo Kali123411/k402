@@ -1,0 +1,72 @@
+{
+  "spec": "k402 kaspa-channel voucher (PROTOCOL.md \u00a74)",
+  "message_format": "sha256( channel_id[32 bytes] || cumulative_total_sompi[8 bytes little-endian] )",
+  "total_range": "0 < total_sompi < 2**63",
+  "signature": "BIP340 schnorr over the message by the payer key; verified against the x-only payer pubkey",
+  "note": "Frozen conformance vectors. Signing uses random aux so signatures are non-reproducible, but these frozen signatures verify forever; message_hex/digest_hex are fully deterministic.",
+  "vectors": [
+    {
+      "payer_privkey": "1111111111111111111111111111111111111111111111111111111111111111",
+      "payer_pubkey": "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+      "channel_id": "abababababababababababababababababababababababababababababababab",
+      "total_sompi": 1,
+      "message_hex": "abababababababababababababababababababababababababababababababab0100000000000000",
+      "digest_hex": "a21cfe9318687254fc139912550b8f729d151245e63e12d9f3b5d42fbe8c833f",
+      "signature_hex": "bd83a46eb585b2db9d98a270a7441500a6dbffee1fbf5e09d5fcd29278d7c4cfcf41e6bf0dc8685ccde0df87edd09fc247013e33308bfb031e72bab4a785135a",
+      "header": "kaspa-channel abababababababababababababababababababababababababababababababab 1 bd83a46eb585b2db9d98a270a7441500a6dbffee1fbf5e09d5fcd29278d7c4cfcf41e6bf0dc8685ccde0df87edd09fc247013e33308bfb031e72bab4a785135a"
+    },
+    {
+      "payer_privkey": "1111111111111111111111111111111111111111111111111111111111111111",
+      "payer_pubkey": "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+      "channel_id": "abababababababababababababababababababababababababababababababab",
+      "total_sompi": 5000000,
+      "message_hex": "abababababababababababababababababababababababababababababababab404b4c0000000000",
+      "digest_hex": "1b40206e6a430ef5830a70e21bf1062d7bef74b3bcfe493d1a68a3ef484249aa",
+      "signature_hex": "6e2a5d439ab0240897e9089aeeeefbcf25ac41757948314335cccf3ebf4d24026af3c96a6fb53d35186413671c1cf18f4b1036915eac8f14ba46e5933f450ff1",
+      "header": "kaspa-channel abababababababababababababababababababababababababababababababab 5000000 6e2a5d439ab0240897e9089aeeeefbcf25ac41757948314335cccf3ebf4d24026af3c96a6fb53d35186413671c1cf18f4b1036915eac8f14ba46e5933f450ff1"
+    },
+    {
+      "payer_privkey": "2222222222222222222222222222222222222222222222222222222222222222",
+      "payer_pubkey": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "channel_id": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "total_sompi": 100000000,
+      "message_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd00e1f50500000000",
+      "digest_hex": "c1d746e5906414216dc7eaca61d12b261a6f0703f813dcc69ab991bedab98546",
+      "signature_hex": "b213bfb27023c7424ad749c1c61e8ff2d240896e042477f22ec8f41da411c43f218ae2eab8038ee26209418d5dab533ea4482dd5e2c7c832e365a639fc959189",
+      "header": "kaspa-channel cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd 100000000 b213bfb27023c7424ad749c1c61e8ff2d240896e042477f22ec8f41da411c43f218ae2eab8038ee26209418d5dab533ea4482dd5e2c7c832e365a639fc959189"
+    },
+    {
+      "payer_privkey": "3333333333333333333333333333333333333333333333333333333333333333",
+      "payer_pubkey": "3c72addb4fdf09af94f0c94d7fe92a386a7e70cf8a1d85916386bb2535c7b1b1",
+      "channel_id": "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+      "total_sompi": 1125899906842623,
+      "message_hex": "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0fffffffffffff0300",
+      "digest_hex": "6e8f513fec31289592d72de4ddda41e500ee60bfd1a02b099a85b15a3d898f25",
+      "signature_hex": "ec9395a95f41e6a7714623e3e95b141066b50fe58a534f3e6b25f11d6d0e76cf696d1b24fb53c7dd8038ba5b0d8e1d455db49c0698a811a8ba408840708b7ba0",
+      "header": "kaspa-channel 0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f 1125899906842623 ec9395a95f41e6a7714623e3e95b141066b50fe58a534f3e6b25f11d6d0e76cf696d1b24fb53c7dd8038ba5b0d8e1d455db49c0698a811a8ba408840708b7ba0"
+    }
+  ],
+  "reject": [
+    {
+      "desc": "tampered total (+1)",
+      "payer_pubkey": "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+      "channel_id": "abababababababababababababababababababababababababababababababab",
+      "total_sompi": 5000001,
+      "signature_hex": "6e2a5d439ab0240897e9089aeeeefbcf25ac41757948314335cccf3ebf4d24026af3c96a6fb53d35186413671c1cf18f4b1036915eac8f14ba46e5933f450ff1"
+    },
+    {
+      "desc": "wrong channel_id",
+      "payer_pubkey": "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+      "channel_id": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "total_sompi": 5000000,
+      "signature_hex": "6e2a5d439ab0240897e9089aeeeefbcf25ac41757948314335cccf3ebf4d24026af3c96a6fb53d35186413671c1cf18f4b1036915eac8f14ba46e5933f450ff1"
+    },
+    {
+      "desc": "wrong payer key",
+      "payer_pubkey": "2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991",
+      "channel_id": "abababababababababababababababababababababababababababababababab",
+      "total_sompi": 5000000,
+      "signature_hex": "6e2a5d439ab0240897e9089aeeeefbcf25ac41757948314335cccf3ebf4d24026af3c96a6fb53d35186413671c1cf18f4b1036915eac8f14ba46e5933f450ff1"
+    }
+  ]
+}
