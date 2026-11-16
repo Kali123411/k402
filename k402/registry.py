@@ -32,6 +32,8 @@ class Listing:
     stake_outpoint: Optional[str] = None                # "txid:index" — optional skin-in-the-game
     meta: dict = field(default_factory=dict)            # model, region, latency_ms_p50, ...
     description: str = ""                                # optional human blurb: what this service offers
+    currency: str = "KAS"                                # "KAS" (price_usd is the quote) | "kUSD" (price_cents is)
+    price_cents: int = 0                                 # kUSD price per call, in cents, when currency == "kUSD"
     listed_at: int = 0
     sig: str = ""                                       # BIP340 over the canonical body by payee_pubkey
 
@@ -52,6 +54,10 @@ class Listing:
         # (and signature) as before this field existed — backward-compatible.
         if self.description:
             d["description"] = self.description
+        # same backward-compatibility rule: a KAS listing's canonical bytes are unchanged by these fields
+        if self.currency != "KAS":
+            d["currency"] = self.currency
+            d["price_cents"] = int(self.price_cents)
         if self.sig:
             d["sig"] = self.sig
         return d
@@ -64,6 +70,7 @@ class Listing:
             schemes=d.get("schemes", ["kaspa-channel", "kaspa-utxo"]),
             channel_terms=d.get("channel_terms", {}), stake_outpoint=d.get("stake_outpoint"),
             meta=d.get("meta", {}), description=d.get("description", ""),
+            currency=d.get("currency", "KAS"), price_cents=int(d.get("price_cents", 0)),
             listed_at=int(d.get("listed_at", 0)), sig=d.get("sig", ""))
 
     def sign(self, payee_privkey_hex: str) -> "Listing":
@@ -93,8 +100,11 @@ class RegistryClient:
         return r.json()
 
     async def search(self, capability: str = "", max_price_usd: Optional[float] = None,
-                     min_reputation_kas: float = 0.0, network: str = "", limit: int = 20) -> list:
+                     min_reputation_kas: float = 0.0, network: str = "", limit: int = 20,
+                     currency: str = "") -> list:
         params: dict[str, Any] = {"limit": limit}
+        if currency:
+            params["currency"] = currency
         if capability:
             params["capability"] = capability
         if max_price_usd is not None:
@@ -113,6 +123,12 @@ class RegistryClient:
     async def report_settled(self, payee_pubkey: str, close_txid: str) -> dict:
         r = await self._http.post(f"{self.base}/registry/settled",
                                   json={"payee_pubkey": payee_pubkey, "close_txid": close_txid})
+        return r.json()
+
+    async def report_settled_kusd(self, payee_pubkey: str, txid: str, cents: int) -> dict:
+        """Report a kUSD payment (the box must still be unspent: report before sweeping)."""
+        r = await self._http.post(f"{self.base}/registry/settled",
+                                  json={"payee_pubkey": payee_pubkey, "txid": txid, "cents": int(cents)})
         return r.json()
 
     async def close(self):
