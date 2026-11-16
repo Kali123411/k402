@@ -136,14 +136,14 @@ def create_registry_app(backend, network: str = "mainnet", db_path: str = "regis
         # optional listing-fee gates (dogfood the payment rails): KAS listings pay listing_fee_sompi in KAS,
         # kUSD listings pay kusd_listing_fee_cents in kUSD (kusd-utxo); each off when 0
         if listing.currency == "kUSD" and kusd_listing_fee_cents > 0 and k402 is not None:
-            hdr = request.headers.get("X-K402-Payment")
+            hdr = k402.payment_header(request.headers)
             if not hdr:
                 from .server import PaymentRequired
                 raise PaymentRequired([await k402.create_kusd_offer(kusd_listing_fee_cents, "registry listing")],
                                       "listing fee required", network=network)
             await k402.verify(hdr, 0, "registry listing", cents=kusd_listing_fee_cents)
         elif listing.currency == "KAS" and listing_fee_sompi > 0 and k402 is not None:
-            hdr = request.headers.get("X-K402-Payment")
+            hdr = k402.payment_header(request.headers)
             if not hdr:
                 from .server import PaymentRequired
                 raise PaymentRequired([await k402.create_offer(listing_fee_sompi, "registry listing")],

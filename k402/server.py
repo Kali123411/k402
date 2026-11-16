@@ -240,6 +240,29 @@ class K402:
         return rec
 
     # -------------------------------------------------------------- FastAPI glue
+    @staticmethod
+    def payment_header(headers) -> Optional[str]:
+        """The k402 payment header a request carries, on either wire: X-K402-Payment as is, or the x402
+        PAYMENT-SIGNATURE (a V2 PaymentPayload) normalised to `<scheme> <txid> <payment_id>` — kUSD by its
+        binding tag, the Kaspa `exact` asset as kaspa-utxo. A 402 that advertised PAYMENT-REQUIRED must take
+        the proof back the same way. Malformed x402 headers read as no payment (the 402 says how to pay)."""
+        hdr = headers.get(PAYMENT_HEADER)
+        if hdr:
+            return hdr
+        from . import x402
+        sig = headers.get(x402.HDR_SIGNATURE)
+        if not sig:
+            return None
+        try:
+            p = x402.extract_payment(x402.decode_signature_header(sig))
+            accepted = x402.decode_signature_header(sig).get("accepted") or {}
+        except (ValueError, TypeError, KeyError):
+            return None
+        if not p.get("txid") or not p.get("payment_id"):
+            return None
+        scheme = SCHEME_KUSD if x402.is_kusd(accepted) else SCHEME_UTXO
+        return f"{scheme} {p['txid']} {p['payment_id']}"
+
     def paid(self, sompi: int, description: str = "", cents: Optional[int] = None):
         """FastAPI dependency: `payment = Depends(k402.paid(sompi=...))`. `cents` prices the call in kUSD
         when a kusd wallet is attached (default: the K402's kusd_price_cents)."""
@@ -249,7 +272,7 @@ class K402:
             raise ImportError("k402.paid() needs fastapi: pip install 'k402[server]'") from e
 
         async def dependency(request) -> PaymentRecord:
-            header = request.headers.get(PAYMENT_HEADER)
+            header = self.payment_header(request.headers)
             if not header:
                 raise await self._demand(sompi, description, cents=cents)
             return await self.verify(header, sompi, description, cents)

@@ -166,3 +166,20 @@ def test_x402_kusd_settle_flow():
     req2 = next(a for a in pr2["accepts"] if x402.is_kusd(a))
     replay = asyncio.run(srv.settle(x402.payment_payload(accepted=req2, txid="d7" * 32)))
     assert replay["success"] is False and replay["errorReason"] == "txid_already_used"
+
+
+def test_k402_endpoint_accepts_the_x402_payment_signature_wire(rig):
+    # a provider that advertised the offer in PAYMENT-REQUIRED must take the proof back as PAYMENT-SIGNATURE:
+    # the registry gate ate a real 10-cent fee on TN10 when it only read X-K402-Payment
+    client, _, wallet, _ = rig
+    r = client.post("/paid")
+    req = next(a for a in x402.decode_required_header(r.headers[x402.HDR_REQUIRED])["accepts"] if x402.is_kusd(a))
+    txid = "d7" * 32
+    wallet.payments[txid] = (PAYEE, 5, 624_000_100)
+    pp = x402.payment_payload(accepted=req, txid=txid, payer="ea" * 32)
+    paid = client.post("/paid", headers={x402.HDR_SIGNATURE: x402.encode_signature_header(pp)})
+    assert paid.status_code == 200, paid.text
+    assert paid.json() == {"ok": True, "scheme": "kusd-utxo", "txid": txid}
+    # and the same proof is refused the second time (txid consumed), on either wire
+    again = client.post("/paid", headers={x402.HDR_SIGNATURE: x402.encode_signature_header(pp)})
+    assert again.status_code == 402 and "already used" in again.json()["reason"]

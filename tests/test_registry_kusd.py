@@ -129,3 +129,26 @@ def test_kusd_listing_fee_required():
     assert paid.status_code == 200 and paid.json()["ok"]
     # KAS listings stay free here
     assert c.post("/registry/list", json=kas_listing(B_PRIV, B_PUB).to_dict()).status_code == 200
+
+
+def test_kusd_listing_fee_paid_on_the_x402_wire():
+    from k402 import K402, x402
+    from k402.addresses import CallbackAddressProvider
+    be, w = FakeBackend(), FakeWallet()
+
+    class Chain(FakeBackend):
+        async def address_received_sompi(self, address):
+            return 0
+    k402 = K402(address_provider=CallbackAddressProvider(lambda pid: f"kaspa:addr{pid[:6]}"), backend=Chain(),
+                network="testnet-10", min_payable_sompi=0, kusd=w, kusd_price_cents=10)
+    app = create_registry_app(be, network="testnet-10", db_path=tempfile.mktemp(suffix=".db"), kusd=w, kusd_listing_fee_cents=10, k402=k402)
+    k402.install(app)
+    c = TestClient(app)
+    r = c.post("/registry/list", json=kusd_listing(A_PRIV, A_PUB, 5).to_dict())
+    assert r.status_code == 402
+    req = next(a for a in x402.decode_required_header(r.headers[x402.HDR_REQUIRED])["accepts"] if x402.is_kusd(a))
+    assert req["amount"] == "10" and req["payTo"] == w.payee_xonly()
+    w.boxes[("d6" * 32, w.payee_xonly(), 10)] = 624_000_100
+    pp = x402.payment_payload(accepted=req, txid="d6" * 32, payer=A_PUB)
+    paid = c.post("/registry/list", json=kusd_listing(A_PRIV, A_PUB, 5).to_dict(), headers={x402.HDR_SIGNATURE: x402.encode_signature_header(pp)})
+    assert paid.status_code == 200 and paid.json()["ok"], paid.text
