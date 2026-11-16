@@ -66,6 +66,19 @@ def requirements(*, network: str, amount_sompi: int, pay_to: str, payment_id: st
     return {"scheme": SCHEME_EXACT, "network": network, "amount": str(amount_sompi),
             "asset": asset, "payTo": pay_to, "maxTimeoutSeconds": max_timeout_seconds, "extra": ex}
 
+_NETWORK_IDS = {"testnet-10": NETWORK_TESTNET, "mainnet": NETWORK_MAINNET}
+
+def network_id(network: str) -> str:
+    """The x402 network id for a k402 network name ("testnet-10" -> "kaspa:testnet-10"); an x402 id passes
+    through. Anything else is refused rather than guessed (a testnet-11 offer must never say testnet-10)."""
+    if network in (NETWORK_TESTNET, NETWORK_MAINNET):
+        return network
+    try:
+        return _NETWORK_IDS[network]
+    except KeyError:
+        raise ValueError(f"unknown network '{network}': x402 bindings exist for testnet-10 and mainnet") from None
+
+
 # ---- kUSD as an asset of the Kaspa network (DESIGN-kusd-market.md §1) ----
 KUSD_SYMBOL = "kUSD"
 KUSD_BINDING = "kusd-holder-v1"
@@ -113,6 +126,10 @@ def encode_signature_header(pp: dict) -> str:
     return b64e_json(pp)
 
 def decode_signature_header(h: str) -> dict:
+    return b64d_json(h)
+
+def decode_response_header(h: str) -> dict:
+    """A PAYMENT-RESPONSE header back into the SettleResponse (clients read errorReason from it)."""
     return b64d_json(h)
 
 

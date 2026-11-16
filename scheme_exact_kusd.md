@@ -19,10 +19,14 @@
              "payment_id": "p_…", "binding": "kusd-holder-v1" } }
 ```
 
-`amount` is in cents (decimal string). `payTo` is the payee's x-only key, which owns the kUSD box the
-payer creates (not a KAS address). `extra.payment_id` correlates the requirement with the server's
-record; `assetTransferMethod: "submitted"` means the payer broadcasts the transaction itself and proves
-it with the txid, as the Kaspa `exact` binding does.
+`amount` is in cents (decimal string). `payTo` is the x-only key that owns the kUSD box the payer
+creates (not a KAS address): the provider's listed key tweaked by
+`tagged_hash("k402/kusd-offer", extra.payment_id)` (BIP340 x-only additive tweak, `lift_x(P) + t·G`).
+A box's address depends only on (amount, owner, family), so this per-offer key is what binds a payment
+to its requirement; a client that knows the provider's listed key checks `payTo` against it.
+`extra.payment_id` correlates the requirement with the server's record; `assetTransferMethod:
+"submitted"` means the payer broadcasts the transaction itself and proves it with the txid, as the
+Kaspa `exact` binding does. `maxTimeoutSeconds` is the requirement's remaining life.
 
 ## PaymentPayload
 
@@ -39,12 +43,15 @@ owned by `payTo` (kusd-client `send`; change returns to the payer) and broadcast
 ## Verification (facilitator / server, against its own node)
 
 1. Recompute the holder box's address: the P2SH of the holder state `{amount, owner: payTo,
-   owner_scheme 0x00, borrow_scheme 0, borrow_guard 0, ext}` where `ext` is the family's gate
-   commitment (read once from the authority box).
+   owner_scheme 0x00, borrow_scheme 0, borrow_guard, ext}` where `borrow_guard` and `ext` are family
+   constants (read once from the authority box; `kusd-client` `KusdState::holder`).
 2. Ask the node for the UTXOs at that address; require an entry whose outpoint's transaction is the
-   payload's `transaction`, whose **covenant id equals `asset`**, and whose accepting DAA score is at or
-   after the requirement's creation.
-3. Consume the txid: the same transaction never settles two requirements.
+   payload's `transaction` (64 hex, compared case-insensitively, consumed in lowercase), whose
+   **covenant id equals `asset`**, and whose accepting DAA score is at or after the requirement's
+   creation.
+3. Consume the txid: the same transaction never settles two requirements. A failed settle answers
+   `payment_not_found` while the box may simply not be indexed yet (the client retries the same
+   txid), `verifier_unavailable` when the server's node is down, `txid_already_used` on a replay.
 
 Only the exact amount is recognisable (the amount is inside the hash); a box of another amount is
 indistinguishable from a payment not yet indexed, so the server answers "retry" until the

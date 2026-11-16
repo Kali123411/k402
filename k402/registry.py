@@ -70,7 +70,8 @@ class Listing:
             schemes=d.get("schemes", ["kaspa-channel", "kaspa-utxo"]),
             channel_terms=d.get("channel_terms", {}), stake_outpoint=d.get("stake_outpoint"),
             meta=d.get("meta", {}), description=d.get("description", ""),
-            currency=d.get("currency", "KAS"), price_cents=int(d.get("price_cents", 0)),
+            # price_cents is outside a KAS listing's signed bytes, so it is never taken from the wire for one
+            currency=d.get("currency", "KAS"), price_cents=int(d.get("price_cents", 0)) if d.get("currency", "KAS") != "KAS" else 0,
             listed_at=int(d.get("listed_at", 0)), sig=d.get("sig", ""))
 
     def sign(self, payee_privkey_hex: str) -> "Listing":

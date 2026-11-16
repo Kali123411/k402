@@ -118,3 +118,61 @@ def test_supported_advertises_kaspa_exact():
     sup = srv.supported()
     k = sup["kinds"][0]
     assert k["x402Version"] == 2 and k["scheme"] == "exact" and ":" in k["network"]
+
+
+# ---- kUSD on the pure x402 server, and the FastAPI glue ----
+def test_paid_dependency_works_under_fastapi():
+    from fastapi import Depends, FastAPI
+    from fastapi.testclient import TestClient
+    srv = X402Server(SeqAddresses(), FakeBackend(), MemoryStore())
+    app = FastAPI()
+    srv.install(app)
+
+    @app.post("/x")
+    async def x(sr=Depends(srv.paid(1000))):
+        return {"ok": True, "tx": sr["transaction"]}
+    c = TestClient(app)
+    r = c.post("/x")
+    assert r.status_code == 402 and x402.HDR_REQUIRED in r.headers, r.text   # not 422: request/response are injected
+    req = x402.decode_required_header(r.headers[x402.HDR_REQUIRED])["accepts"][0]
+    # a failed settle still tells the client how to pay again
+    bad = c.post("/x", headers={x402.HDR_SIGNATURE: x402.encode_signature_header(x402.payment_payload(accepted=req, txid="aa" * 32))})
+    assert bad.status_code == 402 and x402.HDR_RESPONSE in bad.headers and x402.HDR_REQUIRED in bad.headers
+
+
+def test_kusd_records_are_shared_with_k402_and_txids_are_canonical():
+    import asyncio
+    from k402 import K402
+    from k402.addresses import CallbackAddressProvider
+    from k402.kusd import Family, VerifyResult
+    from k402.kusd_keys import derive_payee
+
+    class Wallet:
+        payments, claims = {}, []
+        def family(self): return Family(authority="06" * 32, borrow_guard="00" * 32, ext="ac" * 32, network="testnet-10")
+        def payee_xonly(self): return "ea" * 32
+        def verify(self, txid, to, cents, authority, since):
+            p = self.payments.get((txid, to, cents))
+            return VerifyResult(ok=p is not None, reason="" if p else "not indexed yet", index=0 if p else None, daa=p, retryable=p is None)
+        def claim(self, txid, index, cents, tweak): self.claims.append((txid, index, cents, tweak)); return {"ok": True}
+
+    class Be(FakeBackend):
+        async def daa_score(self): return 7
+    w, be, store = Wallet(), Be(), MemoryStore()
+    srv = X402Server(SeqAddresses(), be, store, network=x402.NETWORK_TESTNET, kusd=w, kusd_price_cents=5)
+    k402 = K402(address_provider=CallbackAddressProvider(lambda pid: "kaspa:a"), backend=be, network="testnet-10", store=store, kusd=w, kusd_price_cents=5)
+    req = next(a for a in asyncio.run(srv.demand(1000, "https://p/x"))["accepts"] if x402.is_kusd(a))
+    pid = req["extra"]["payment_id"]
+    assert req["payTo"] == derive_payee("ea" * 32, pid)
+    w.payments[("ab" * 32, req["payTo"], 5)] = 9
+    # one store, two front doors: the record X402Server minted settles through K402's header path
+    rec = asyncio.run(k402.verify(f"kusd-utxo {'AB' * 32} {pid}", 1000, cents=5))
+    assert rec.meta["txid"] == "ab" * 32 and w.claims[-1][0] == "ab" * 32
+    # and the x402 settle of the same txid, in any case, is a replay
+    req2 = next(a for a in asyncio.run(srv.demand(1000, "https://p/x"))["accepts"] if x402.is_kusd(a))
+    w.payments[("ab" * 32, req2["payTo"], 5)] = 9
+    s = asyncio.run(srv.settle(x402.payment_payload(accepted=req2, txid="AB" * 32)))
+    assert s["success"] is False and s["errorReason"] == "txid_already_used"
+    import pytest
+    with pytest.raises(ValueError, match="daa_score"):
+        X402Server(SeqAddresses(), FakeBackend(), MemoryStore(), kusd=w, kusd_price_cents=5)

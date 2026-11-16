@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Exact amounts: a payment is a holder box of exactly `amount_cents` owned by `payTo`, family `asset` (authority covid). Verification: `kusd-client` `box_address` of `{amount, owner, 0x00, 0, borrow_guard, ext}` → node UTXOs at that address → entry with `outpoint.transactionId == txid`, `covenant_id == authority`, `blockDaaScore >= since_daa`; txid consumed once. REST API (`/addresses/{a}/utxos`) only as a configured fallback.
+- Exact amounts: a payment is a holder box of exactly `amount_cents` owned by `payTo`, family `asset` (authority covid). Verification: `kusd-client` `box_address` of `{amount, owner, 0x00, 0, borrow_guard, ext}` → node UTXOs at that address → entry with `outpoint.transactionId == txid`, `covenant_id == authority`, `blockDaaScore >= since_daa`; txid consumed once. Node only (the REST index lists no covenant ids — ruled out in review). `payTo` is the provider's key tweaked per offer (`kusd_keys`, added after the branch review).
 - x402 V2 requirement for kUSD: `scheme exact`, `network kaspa:testnet-10|kaspa:mainnet`, `amount` cents (string), `asset` authority covid hex, `payTo` payee x-only hex, `extra {assetSymbol: "kUSD", decimals: 2, assetTransferMethod: "submitted", payment_id, binding: "kusd-holder-v1"}`; payload proves with the txid as the KAS binding does. k402-native: scheme `kusd-utxo`, offer fields `amount_cents, pay_to_pubkey, authority, payment_id, expires, network`, header `kusd-utxo <txid> <payment_id>`.
 - Listings: `currency ∈ {KAS, kUSD}` (default KAS), `price_cents` int; existing listings' canonical bytes unchanged (new fields only when set). Ranking: `currency=kUSD` → `settled_cents` then price; `currency=KAS` → as today; none → USD value, KAS at the kUSD oracle liq price from the relay (ordering only).
 - Registry: kUSD listing fee 10 cents (TN10); delist and settled reports stay free; a settled report is verified by address and refused once the box is spent.
@@ -42,7 +42,7 @@
 - `market::relay_protocol(json: &serde_json::Value) -> Result<ProtocolBoxes, String>` (parse the relay's `/state`), checked against the node by the bin as `tn10_deploy` does.
 - CLI (`kusd_pay <cmd> [--json]`, env `KUSD_KEY_FILE`, `KUSD_NODE_URL` (default `grpc://192.168.4.38:16210`), `KUSD_RELAY_URL` (default `http://127.0.0.1:8735`), `KUSD_NETWORK` (`testnet-10`)):
   - `send --to <xonly> --cents N` → `{"txid","index","amount","change_cents"}`;
-  - `verify --txid T --to <xonly> --cents N --authority <covid> --since-daa D [--api URL]` → `{"ok":true,"index","daa"}` | `{"ok":false,"reason"}` (exit 0 either way; exit 2 on usage);
+  - `verify --txid T --to <xonly> --cents N --authority <covid> --since-daa D` → `{"ok":true,"index","daa"}` | `{"ok":false,"reason","retryable"}` (exit 0 either way; exit 2 on usage); `claim --txid T --index I --cents N --tweak H` records an offer's box for spending;
   - `buy --cents N` → `{"txid","cents","kas_in","fee"}` (kusd-client `swap_in`, fee switch honoured);
   - `balance` → `{"kusd_cents","boxes":[{"txid","index","cents"}],"kas_sompi","address","xonly"}`;
   - `family` → `{"authority","borrow_guard","ext","network"}`.
@@ -62,7 +62,7 @@
 
 **Interfaces:**
 - Consumes: Task 1 CLI JSON shapes.
-- Produces: `KusdWallet(bin_path, key_file, node_url=None, relay_url=None, network="testnet-10", api_fallback=None)` with `family() -> Family`, `send(to_xonly, cents) -> dict`, `verify(txid, to_xonly, cents, authority, since_daa) -> VerifyResult(ok, reason, index, daa, retryable)`, `buy(cents) -> dict`, `balance() -> dict`; `KusdOffer(network, amount_cents, pay_to_pubkey, authority, payment_id, expires, description)`; `x402.kusd_requirements(...)`.
+- Produces: `KusdWallet(bin_path, key_file, *, authority, node_url=None, relay_url=None, network="testnet-10")` with `family() -> Family`, `send(to_xonly, cents) -> dict`, `verify(txid, to_xonly, cents, authority, since_daa) -> VerifyResult(ok, reason, index, daa, retryable)`, `claim(txid, index, cents, tweak)`, `buy(cents) -> dict`, `balance() -> dict`; `KusdOffer(network, amount_cents, pay_to_pubkey, authority, payment_id, expires, description)`; `x402.kusd_requirements(...)`.
 
 - [ ] **Step 1: Failing tests** (fake `kusd_pay` = a Python script in `tests/fake_kusd_pay.py` driven by env `FAKE_KUSD_RESULT`): `test_kusd.py`: `wallet_parses_bin_json`, `wallet_refuses_key_file_not_600`, `verify_result_retryable_when_not_indexed`; `test_kusd_server.py` (FastAPI TestClient): `kusd_offer_in_402_on_both_wires` (k402 body has `kusd-utxo`; `PAYMENT-REQUIRED` has `exact` with the kUSD asset), `kas_and_kusd_offers_coexist` (RF 4), `kusd_payment_served_once`, `replayed_txid_refused` (RF 2), `unindexed_payment_is_retry_not_failure` (RF 3: 402 again with the same payment_id), `wrong_amount_refused`.
 - [ ] **Step 2:** `.venv/bin/python -m pytest tests/test_kusd.py tests/test_kusd_server.py -q` → FAIL.

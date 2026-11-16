@@ -2,12 +2,14 @@
 # pay_best) that settles each call with a kUSD holder box. x402 first: read the 402's PAYMENT-REQUIRED header,
 # pick the `exact` requirement whose asset is our kUSD family, `wallet.send`, retry with PAYMENT-SIGNATURE.
 # k402's own wire is the fallback for a provider that answers with only the k402 body (kusd-utxo offer +
-# X-K402-Payment). Every payment is checked against the wallet's family and the agent's price cap BEFORE the
-# box is built, and a "not indexed yet" 402 is retried with the same txid — a payer never pays twice.
+# X-K402-Payment). Before any box is built the quote is checked: our family, our network, a price within the
+# cap (the listing's price by default), and a payee that is the listed provider's key tweaked by the offer
+# (so a hijacked endpoint cannot redirect the money). After the box is built there is no fail-over: a
+# "not indexed yet" 402 is retried with the same txid, anything else raises PaymentSent with the txid.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import urlsplit
 
@@ -16,6 +18,7 @@ import httpx
 from . import x402
 from .channel_client import RouteError, RouteResult
 from .kusd import KusdError
+from .kusd_keys import derive_payee
 from .registry import RegistryClient
 from .schemes import PAYMENT_HEADER, SCHEME_KUSD, KusdOffer, parse_offers
 
@@ -23,6 +26,9 @@ from .schemes import PAYMENT_HEADER, SCHEME_KUSD, KusdOffer, parse_offers
 # when it merges or spends the box; the network fee is an upper bound (a `send` costs ~0.07 KAS on TN10)
 HOLDER_VALUE_SOMPI = 150_000_000
 SEND_FEE_SOMPI = 10_000_000
+
+# x402 PAYMENT-RESPONSE errorReasons after which the same payment is presented again
+RETRYABLE_X402 = {"payment_not_found", "verifier_unavailable"}
 
 
 @dataclass(frozen=True)
@@ -44,6 +50,7 @@ class Quote:
     pay_to: str
     authority: str
     payment_id: str
+    network: str                    # as the offer named it (k402 name or x402 id)
     wire: str                       # "x402" | "k402"
     accepted: Optional[dict] = None # the x402 requirement we accept (x402 wire only)
 
@@ -57,6 +64,16 @@ class PayResult:
     outlay: Outlay
     topped_up: Optional[dict] = None  # the PSM buy made first, when the wallet was short
     attempts: int = 1                 # paid requests sent (retries while the payment was unindexed)
+
+
+class PaymentSent(KusdError):
+    """The box was built and broadcast, but the provider did not serve the call. Carries the txid: the money
+    moved, so the caller must not pay anyone else for this call without deciding what to do about it."""
+
+    def __init__(self, txid: str, cents: int, provider: dict, response: httpx.Response, attempts: int):
+        self.txid, self.cents, self.provider, self.response, self.attempts = txid, cents, provider, response, attempts
+        self.status = response.status_code
+        super().__init__(f"paid {cents}¢ (tx {txid[:8]}…) to {provider.get('payee_pubkey', provider.get('endpoint'))} but got HTTP {self.status} after {attempts} attempt(s)")
 
 
 def _base_url(endpoint: str) -> str:
@@ -76,10 +93,9 @@ class KusdPayer:
         self._registry = RegistryClient(registry_url, http=self.http) if registry_url else None
         self._family = None
 
-    @property
-    def family(self):
+    async def family(self):
         if self._family is None:
-            self._family = self.wallet.family()
+            self._family = await asyncio.to_thread(self.wallet.family)
         return self._family
 
     # -------- discovery + client-side routing --------
@@ -112,7 +128,7 @@ class KusdPayer:
             for req in pr.get("accepts") or []:
                 if req.get("scheme") == x402.SCHEME_EXACT and x402.is_kusd(req):
                     extra = req.get("extra") or {}
-                    return Quote(cents=int(req["amount"]), pay_to=req["payTo"], authority=req["asset"],
+                    return Quote(cents=int(req["amount"]), pay_to=req["payTo"], authority=req["asset"], network=req.get("network", ""),
                                  payment_id=extra.get("payment_id", ""), wire="x402", accepted=req)
         try:
             body = r.json()
@@ -121,54 +137,72 @@ class KusdPayer:
             offers = []
         for o in offers:
             if isinstance(o, KusdOffer):
-                return Quote(cents=int(o.amount_cents), pay_to=o.pay_to_pubkey, authority=o.authority,
+                return Quote(cents=int(o.amount_cents), pay_to=o.pay_to_pubkey, authority=o.authority, network=o.network,
                              payment_id=o.payment_id, wire="k402")
         raise KusdError("the provider's 402 carries no kUSD offer on either wire")
 
-    def _check(self, q: Quote, max_price_cents: Optional[int]) -> None:
-        """Refuse before any box is built: another family's kUSD, or a price above the agent's cap."""
-        if q.authority.lower() != self.family.authority.lower():
-            raise KusdError(f"asset mismatch: the provider wants kUSD of family {q.authority[:8]}…, this wallet holds {self.family.authority[:8]}…")
+    async def _check(self, q: Quote, max_price_cents: Optional[int], provider: dict) -> None:
+        """Refuse before any box is built: another family's kUSD, another network, a price above the cap, a
+        payee that is not the listed provider's key for this offer, a malformed payment_id."""
+        family = await self.family()
+        if q.authority.lower() != family.authority.lower():
+            raise KusdError(f"asset mismatch: the provider wants kUSD of family {q.authority[:8]}…, this wallet holds {family.authority[:8]}…")
+        if q.network not in (self.network, x402.network_id(self.network)):
+            raise KusdError(f"network mismatch: the offer is on {q.network}, this payer is on {self.network}")
         if max_price_cents is not None and q.cents > max_price_cents:
             raise KusdError(f"price {q.cents}¢ is above the cap of {max_price_cents}¢")
         if q.cents <= 0:
             raise KusdError("the provider quoted a non-positive price")
+        if not q.payment_id:
+            raise KusdError("the offer names no payment_id")
+        listed = provider.get("payee_pubkey")
+        if listed and q.pay_to.lower() != derive_payee(listed, q.payment_id):
+            raise KusdError("payee mismatch: the quote is not paid to the listed provider's key for this offer")
 
     @staticmethod
     def outlay(cents: int) -> Outlay:
         return Outlay(price_cents=int(cents))
 
-    def ensure_funds(self, cents: int) -> Optional[dict]:
+    async def ensure_funds(self, cents: int) -> Optional[dict]:
         """Top the wallet up through the PSM when its kUSD is short: the shortfall plus `headroom_cents`
         (the agent pays KAS for it, and the PSM's fee). Returns the buy, or None when nothing was needed."""
-        have = int(self.wallet.balance().get("kusd_cents", 0))
+        have = int((await asyncio.to_thread(self.wallet.balance)).get("kusd_cents", 0))
         if have >= cents:
             return None
-        return self.wallet.buy(cents - have + self.headroom_cents)
+        return await asyncio.to_thread(self.wallet.buy, cents - have + self.headroom_cents)
 
-    def _paid_headers(self, q: Quote, txid: str) -> dict:
+    def _paid_headers(self, q: Quote, txid: str, payer: str) -> dict:
         if q.wire == "x402":
-            pp = x402.payment_payload(accepted=q.accepted, txid=txid, payer=self.wallet.payee_xonly())
+            pp = x402.payment_payload(accepted=q.accepted, txid=txid, payer=payer)
             return {x402.HDR_SIGNATURE: x402.encode_signature_header(pp)}
         return {PAYMENT_HEADER: f"{SCHEME_KUSD} {txid} {q.payment_id}"}
 
     @staticmethod
     def _retryable(r: httpx.Response) -> bool:
-        """A 402 after payment that only means 'not indexed yet' (the provider re-issued the same offer)."""
+        """A 402 after payment that only means 'not indexed yet': the k402 body says so, or the x402
+        PAYMENT-RESPONSE's errorReason is payment_not_found / verifier_unavailable."""
         if r.status_code != 402:
             return False
+        resp = r.headers.get(x402.HDR_RESPONSE)
+        if resp:
+            try:
+                if x402.decode_response_header(resp).get("errorReason") in RETRYABLE_X402:
+                    return True
+            except (ValueError, TypeError, KeyError):
+                pass
         try:
             reason = (r.json().get("reason") or "").lower()
-        except ValueError:
+        except (ValueError, AttributeError):
             return False
         return "not indexed" in reason or "retry" in reason
 
     # -------- pay one call --------
     async def pay(self, provider: dict, path: str = "", json_body: Optional[dict] = None, *,
                   max_price_cents: Optional[int] = None, ensure: bool = True) -> PayResult:
-        """Pay one call to `provider` (a discover() result or {"endpoint": url}) in kUSD: fetch the 402,
-        check the quote, top up if short, build the box, retry with the proof; wait out "not indexed yet"
-        on the same txid. Raises KusdError before any box is built when the quote is refused."""
+        """Pay one call to `provider` (a discover() result or {"endpoint": url, "payee_pubkey"?}) in kUSD:
+        fetch the 402, check the quote, top up if short, build the box, retry with the proof; wait out "not
+        indexed yet" on the same txid. Raises KusdError before any box is built when the quote is refused,
+        PaymentSent when the box was built but the call was not served."""
         base = _base_url(provider["endpoint"])
         p_path = path or (urlsplit(provider["endpoint"]).path or "/")
         url = base + (p_path if p_path.startswith("/") else "/" + p_path)
@@ -176,11 +210,11 @@ class KusdPayer:
         if first.status_code < 400:
             return PayResult(response=first, txid="", cents=0, wire="free", outlay=Outlay(0, 0, 0), attempts=0)
         q = self._quote(first)
-        self._check(q, max_price_cents)
-        topped = self.ensure_funds(q.cents) if ensure else None
-        sent = self.wallet.send(q.pay_to, q.cents)
-        txid = sent["txid"]
-        headers = self._paid_headers(q, txid)
+        await self._check(q, max_price_cents, provider)
+        topped = await self.ensure_funds(q.cents) if ensure else None
+        sent = await asyncio.to_thread(self.wallet.send, q.pay_to, q.cents)
+        txid = str(sent["txid"]).lower()
+        headers = self._paid_headers(q, txid, await asyncio.to_thread(self.wallet.payee_xonly))
         attempts = 0
         delays = iter(self.retry_delays)
         while True:
@@ -192,6 +226,8 @@ class KusdPayer:
             if d is None:
                 break
             await asyncio.sleep(d)
+        if r.status_code >= 400:
+            raise PaymentSent(txid, q.cents, provider, r, attempts)
         return PayResult(response=r, txid=txid, cents=q.cents, wire=q.wire, outlay=self.outlay(q.cents),
                          topped_up=topped, attempts=attempts)
 
@@ -209,7 +245,9 @@ class KusdPayer:
                        policy: str = "registry", max_tries: int = 3, max_price_cents: Optional[int] = None,
                        preflight: bool = True) -> RouteResult:
         """Discover kUSD providers for `capability`, rank them, pay the first that serves the call, fail over
-        on any error up to `max_tries` paid attempts. The RouteResult's `result` is the PayResult."""
+        on a refused quote or a dead endpoint up to `max_tries` — never after a box was built (PaymentSent
+        propagates). The cap is `max_price_cents`, else each provider's listed price. The RouteResult's
+        `result` is the PayResult."""
         providers = self.rank(await self.discover(capability, max_price_cents=max_price_cents), policy)
         attempts: list = []
         tries = 0
@@ -219,16 +257,17 @@ class KusdPayer:
                 attempts.append((payee, "preflight: not a live kUSD pay-gate"))
                 continue
             tries += 1
+            cap = max_price_cents if max_price_cents is not None else (int(provider["price_cents"]) if provider.get("price_cents") else None)
             try:
-                res = await self.pay(provider, path, json_body, max_price_cents=max_price_cents)
+                res = await self.pay(provider, path, json_body, max_price_cents=cap)
+            except PaymentSent:
+                raise
             except (KusdError, httpx.HTTPError) as e:
                 attempts.append((payee, f"error: {e}"))
             else:
-                if res.response.status_code < 400:
-                    out = RouteResult(response=res.response, provider=provider, attempts=attempts)
-                    out.result = res
-                    return out
-                attempts.append((payee, f"HTTP {res.response.status_code}"))
+                out = RouteResult(response=res.response, provider=provider, attempts=attempts)
+                out.result = res
+                return out
             if tries >= max_tries:
                 break
         raise RouteError(capability, attempts)

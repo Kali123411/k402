@@ -15,5 +15,8 @@ if cmd not in results:
     print(json.dumps({"error": f"fake has no result for {cmd}"}))
     sys.exit(1)
 out = results[cmd]
-print(json.dumps(out))
+print(json.dumps(out), flush=True)
+# FAKE_KUSD_SLEEP: linger after printing (the real binary publishes to the relay after it prints its result)
+import time
+time.sleep(float(os.environ.get("FAKE_KUSD_SLEEP", "0")))
 sys.exit(int(results.get(cmd + "_exit", 0)))

@@ -39,6 +39,10 @@ class PaymentStore(Protocol):
         """Consume a payment transaction id (kusd-utxo replay protection); True exactly once."""
         ...
 
+    def txid_used(self, txid: str) -> bool:
+        """Whether a transaction id was already consumed (a cheap check before asking the chain)."""
+        ...
+
 
 class MemoryStore:
     """Process-local store. Fine for a single-worker dev server."""
@@ -70,6 +74,10 @@ class MemoryStore:
                 return False
             self._txids.add(txid)
             return True
+
+    def txid_used(self, txid: str) -> bool:
+        with self._lock:
+            return txid in self._txids
 
 
 class SqliteStore:
@@ -131,3 +139,6 @@ class SqliteStore:
     def mark_txid_used(self, txid: str) -> bool:
         cur = self._conn().execute("INSERT OR IGNORE INTO k402_txids (txid) VALUES (?)", (txid,))
         return cur.rowcount == 1
+
+    def txid_used(self, txid: str) -> bool:
+        return self._conn().execute("SELECT 1 FROM k402_txids WHERE txid=?", (txid,)).fetchone() is not None

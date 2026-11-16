@@ -76,8 +76,13 @@ layer k402 already has (`k402/x402.py`, `X402Server`: `PAYMENT-REQUIRED` / `PAYM
 ```
 
 `asset` is the authority's covenant id, which is kUSD's on-chain identity (the way USDC's asset is
-its contract address); `amount` is in cents; `payTo` is the payee's x-only key (a kUSD box owner,
-not a KAS address). The payer broadcasts the kUSD `send` and proves it with the txid in the
+its contract address); `amount` is in cents; `payTo` is a kUSD box owner (an x-only key, not a KAS
+address): **the provider's listed key tweaked by `tagged_hash("k402/kusd-offer", payment_id)`**
+(BIP340 x-only additive tweak; `k402/kusd_keys.py`, `kusd-client` `Wallet::tweaked`). A box's address
+is a function of (cents, owner, family), so with one key for every offer anyone watching the
+provider's address could claim another payer's box with their own payment_id; the per-offer key
+binds the box to its offer, the payer checks `payTo` against the listing, and only the provider can
+derive the spending key *(call, after review)*. The payer broadcasts the kUSD `send` and proves it with the txid in the
 `PaymentPayload`, exactly as the KAS `exact` binding does. An x402 client that knows the kUSD asset
 can pay; one that doesn't skips the offer, as x402 requires. The binding is written up as
 `scheme_exact_kusd.md` beside `scheme_exact_kaspa.md`.
@@ -95,10 +100,12 @@ k402-native offer:
 
 Its payment header is the standard three tokens: `kusd-utxo <txid> <payment_id>`.
 
-**Paying** means a transaction that creates a kUSD holder box owned by `pay_to_pubkey` with
-`amount == amount_cents`, exactly, in the kUSD family named by `authority` (its covenant id). That
-is what `kusd-client`'s `send` builds (one box to the recipient, change back to the payer), so the
-agent's wallet already knows how.
+**Paying** means a transaction that creates a kUSD holder box owned by `pay_to_pubkey` (the
+offer's derived key) with `amount == amount_cents`, exactly, in the kUSD family named by `authority`
+(its covenant id). That is what `kusd-client`'s `send` builds (one box to the recipient, change back
+to the payer), so the agent's wallet already knows how. After verifying, the provider's wallet
+records the box with its tweak (`kusd_pay claim`) and later spends it with `send_from`, each input
+signed by its own key.
 
 **Why exactly, not "at least"**: a kUSD box's state, amount included, sits behind its P2SH script
 hash and is revealed only when the box is spent. A verifier can therefore only rebuild the script
@@ -171,16 +178,21 @@ switch and PSM state are irrelevant to the provider: it receives boxes.
 `Listing` gains `currency` (`"KAS"` default, `"kUSD"`) and `price_cents` (int) *(call: a new field
 rather than redefining `price_usd`, so every existing signed listing keeps its bytes and signature)*.
 A kUSD listing's `schemes` includes `kusd-utxo`. `price_usd` stays the comparable figure for both
-currencies (for kUSD it is `price_cents / 100`). The registry's search gains `currency=`; ranking is
-unchanged. `k402-mcp`'s `registry_search` gains `currency`.
+currencies (for kUSD it is `price_cents / 100`, enforced). The registry's search gains `currency=`
+and `min_settled_cents=`; ranking is per currency (§6). `k402-mcp`'s `registry_search` gains
+`currency`.
 
 ### 5. Agent side
 
 `KusdPayer(wallet: KusdWallet, registry_url, …)`, a sibling of `ChannelPayer` sharing its
 `discover / rank / preflight / pay_best` shape:
 
-- `pay(provider, path, json_body)`: GET the 402, pick the `kusd-utxo` offer, `wallet.send(pay_to,
-  cents)`, retry with the header; on 402 again, surface the reason.
+- `pay(provider, path, json_body)`: fetch the 402, read the kUSD requirement (x402 header first,
+  k402 body second), check it before any box is built — our family, our network, a price within the
+  cap (the listing's `price_cents` by default), `payTo` = the listed key tweaked by the offer — then
+  `wallet.send(pay_to, cents)` and retry with the proof. A "not indexed yet" 402 is retried on the
+  same txid; any other failure after the box was built raises `PaymentSent` with the txid, and
+  `pay_best` never fails over to another provider once money has moved.
 - `ensure_funds(cents)`: when the wallet's kUSD is short, `wallet.buy(shortfall + headroom)` through
   the PSM (the agent needs KAS; the PSM's current fee is quoted first).
 - The outlay the agent is told before paying: `price_cents` plus the box's 1.5 KAS plus the network
