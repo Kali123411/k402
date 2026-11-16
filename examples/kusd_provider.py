@@ -56,4 +56,6 @@ async def summarize(body: dict, payment: PaymentRecord = Depends(k402.paid(PRICE
 
 @app.get("/healthz")
 def healthz():
-    return {"ok": True, "price_cents": PRICE_CENTS, "payee": w.payee_xonly(), "model": MODEL}
+    # cheap: no chain call per probe. The payee is cached by the wallet after its first successful look-up
+    # (a 402 has been served); until then it is simply not reported, never a 500
+    return {"ok": True, "price_cents": PRICE_CENTS, "payee": getattr(w, "_xonly", None), "model": MODEL}
