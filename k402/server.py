@@ -16,20 +16,37 @@ from typing import Optional
 from .addresses import AddressProvider
 from .backend import ChainBackend
 from .channel import SCHEME_CHANNEL, parse_channel_header
-from .schemes import (PAYMENT_HEADER, SCHEME_BLOCKBOOK, SCHEME_EVM, SCHEME_UTXO,
+from .schemes import (PAYMENT_HEADER, SCHEME_BLOCKBOOK, SCHEME_EVM, SCHEME_KUSD, SCHEME_UTXO, KusdOffer,
                       BlockbookOffer, EvmOffer, FacilitatorFee, Offer, ProtocolError,
                       UtxoOffer, new_payment_id, parse_payment_header, payment_required_body)
 from .store import MemoryStore, PaymentRecord, PaymentStore
 
 
 class PaymentRequired(Exception):
-    """Raised when a request must (re)pay. Carries the 402 body to send."""
+    """Raised when a request must (re)pay. Carries the 402 body to send, and the same offers as x402 V2
+    PaymentRequirements for the PAYMENT-REQUIRED header (kaspa-utxo as the Kaspa `exact` binding, kusd-utxo as
+    the kUSD asset binding), so one provider serves k402-native and x402 clients alike."""
 
-    def __init__(self, offers: list[Offer], reason: str = ""):
+    def __init__(self, offers: list[Offer], reason: str = "", network: str = "mainnet"):
         self.body = payment_required_body(offers)
         if reason:
             self.body["reason"] = reason
+        self.offers = offers
+        self.network = network
         super().__init__(reason or "payment required")
+
+    def x402_accepts(self) -> list:
+        from . import x402
+        net = x402.NETWORK_TESTNET if "test" in self.network else x402.NETWORK_MAINNET
+        out = []
+        for o in self.offers:
+            d = o.to_dict()
+            if d.get("scheme") == SCHEME_UTXO:
+                out.append(x402.requirements(network=net, amount_sompi=int(d["amount_sompi"]), pay_to=d["pay_to"], payment_id=d["payment_id"]))
+            elif d.get("scheme") == SCHEME_KUSD:
+                out.append(x402.kusd_requirements(network=net, amount_cents=int(d["amount_cents"]), pay_to_pubkey=d["pay_to_pubkey"],
+                                                  authority=d["authority"], payment_id=d["payment_id"]))
+        return out
 
 
 # Kaspa's anti-spam rule rejects transactions whose outputs fall below a dust/storage-mass
@@ -48,7 +65,8 @@ class K402:
                  coin: Optional[str] = None, decimals: int = 8,
                  capture_baseline: bool = True,
                  evm: Optional[dict] = None,
-                 channel_manager=None):
+                 channel_manager=None,
+                 kusd=None, kusd_price_cents: Optional[int] = None):
         self.address_provider = address_provider
         self.backend = backend
         self.store = store or MemoryStore()
@@ -74,6 +92,11 @@ class K402:
         # its own; k402 just routes the per-call voucher header to it. The channel offer is added
         # to every 402 so payers can discover the terms.
         self.channel_manager = channel_manager
+        # kusd (a KusdWallet) set -> also offer and accept kusd-utxo: a kUSD holder box of exactly
+        # kusd_price_cents owned by this provider's key, verified by the wallet against the node
+        # (DESIGN-kusd-market.md). The payee key is the wallet's own.
+        self.kusd = kusd
+        self.kusd_price_cents = kusd_price_cents
 
     # -------------------------------------------------------------- protocol core
     async def create_offer(self, sompi: int, description: str = "") -> Offer:
@@ -112,14 +135,56 @@ class K402:
             amount_sompi=charged, expires=offer.expires, baseline=baseline))
         return offer
 
-    async def _demand(self, sompi: int, description: str, reason: str = "") -> PaymentRequired:
+    async def create_kusd_offer(self, cents: int, description: str = "") -> KusdOffer:
+        """A kusd-utxo offer: the record keeps the payee key as `address`, the cents as `amount_sompi`, and the
+        node's DAA score at offer time as `baseline` (a payment accepted before it never counts)."""
+        payment_id = new_payment_id()
+        payee = self.kusd.payee_xonly()
+        family = self.kusd.family()
+        daa = await self.backend.daa_score() if hasattr(self.backend, "daa_score") else 0
+        expires = int(time.time()) + self.quote_ttl
+        self.store.create(PaymentRecord(payment_id=payment_id, address=payee, amount_sompi=int(cents), expires=expires,
+                                        baseline=int(daa), meta={"scheme": SCHEME_KUSD}))
+        return KusdOffer(network=self.network, amount_cents=str(int(cents)), pay_to_pubkey=payee, authority=family.authority,
+                         payment_id=payment_id, expires=expires, description=description)
+
+    async def _demand(self, sompi: int, description: str, reason: str = "", cents: Optional[int] = None,
+                      reuse: Optional[KusdOffer] = None) -> PaymentRequired:
         offers = [await self.create_offer(sompi, description), *self.extra_offers]
         if self.channel_manager is not None:
             offers.append(self.channel_manager.offer(max(int(sompi), 1)))
-        return PaymentRequired(offers, reason)
+        if self.kusd is not None and (cents or self.kusd_price_cents):
+            offers.append(reuse or await self.create_kusd_offer(cents or self.kusd_price_cents, description))
+        return PaymentRequired(offers, reason, network=self.network)
+
+    async def _verify_kusd(self, txid: str, payment_id: str, sompi: int, description: str, cents: Optional[int]) -> PaymentRecord:
+        rec = self.store.get(payment_id)
+        if rec is None or rec.meta.get("scheme") != SCHEME_KUSD:
+            raise await self._demand(sompi, description, "unknown payment_id", cents)
+        if rec.used:
+            raise await self._demand(sompi, description, "payment_id already used", cents)
+        if rec.expired:
+            raise await self._demand(sompi, description, "quote expired", cents)
+        family = self.kusd.family()
+        r = self.kusd.verify(txid, rec.address, rec.amount_sompi, family.authority, rec.baseline)
+        if not r.ok:
+            if r.retryable:
+                # the same offer comes back: the payment may not be indexed yet (or the box has the wrong amount,
+                # which looks the same; the quote's expiry bounds the retries)
+                same = KusdOffer(network=self.network, amount_cents=str(rec.amount_sompi), pay_to_pubkey=rec.address,
+                                 authority=family.authority, payment_id=payment_id, expires=rec.expires, description=description)
+                raise await self._demand(sompi, description, f"{r.reason} (tx {txid} not indexed yet? retry shortly)", cents, reuse=same)
+            raise await self._demand(sompi, description, r.reason, cents)
+        if not self.store.mark_txid_used(txid):
+            raise await self._demand(sompi, description, "txid already used", cents)
+        if not self.store.mark_used(payment_id):
+            raise await self._demand(sompi, description, "payment_id already used", cents)
+        rec.used = True
+        rec.meta.update(txid=txid, index=r.index, daa=r.daa)
+        return rec
 
     async def verify(self, header_value: str, sompi: int,
-                     description: str = "") -> PaymentRecord:
+                     description: str = "", cents: Optional[int] = None) -> PaymentRecord:
         """Verify an X-K402-Payment header; returns the consumed PaymentRecord.
         Raises PaymentRequired (with a fresh offer) on any failure."""
         # kaspa-channel has a 4-token header (scheme, channel, total, voucher) and settles via the
@@ -142,7 +207,11 @@ class K402:
         try:
             scheme, txid, payment_id = parse_payment_header(header_value)
         except ProtocolError as e:
-            raise await self._demand(sompi, description, str(e))
+            raise await self._demand(sompi, description, str(e), cents)
+        if scheme == SCHEME_KUSD:
+            if self.kusd is None:
+                raise await self._demand(sompi, description, "kusd-utxo is not accepted here", cents)
+            return await self._verify_kusd(txid, payment_id, sompi, description, cents)
         expected_scheme = (SCHEME_EVM if self.evm is not None else
                            SCHEME_BLOCKBOOK if self.coin is not None else SCHEME_UTXO)
         if scheme != expected_scheme:
@@ -171,8 +240,9 @@ class K402:
         return rec
 
     # -------------------------------------------------------------- FastAPI glue
-    def paid(self, sompi: int, description: str = ""):
-        """FastAPI dependency: `payment = Depends(k402.paid(sompi=...))`."""
+    def paid(self, sompi: int, description: str = "", cents: Optional[int] = None):
+        """FastAPI dependency: `payment = Depends(k402.paid(sompi=...))`. `cents` prices the call in kUSD
+        when a kusd wallet is attached (default: the K402's kusd_price_cents)."""
         try:
             from fastapi import Request
         except ImportError as e:
@@ -181,8 +251,8 @@ class K402:
         async def dependency(request) -> PaymentRecord:
             header = request.headers.get(PAYMENT_HEADER)
             if not header:
-                raise await self._demand(sompi, description)
-            return await self.verify(header, sompi, description)
+                raise await self._demand(sompi, description, cents=cents)
+            return await self.verify(header, sompi, description, cents)
 
         # `from __future__ import annotations` stringifies closure annotations,
         # and FastAPI can't resolve "Request" from a function-local import —
@@ -200,7 +270,14 @@ class K402:
 
         @app.exception_handler(PaymentRequired)
         async def _handler(request, exc: PaymentRequired):
-            return JSONResponse(status_code=402, content=exc.body)
+            from . import x402
+            accepts = exc.x402_accepts()
+            headers = {}
+            if accepts:
+                pr = x402.payment_required(resource=x402.resource_info(str(request.url)), accepts=accepts,
+                                           error=exc.body.get("reason"))
+                headers[x402.HDR_REQUIRED] = x402.encode_required_header(pr)
+            return JSONResponse(status_code=402, content=exc.body, headers=headers)
 
         mgr = self.channel_manager
         if mgr is None:

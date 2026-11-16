@@ -147,6 +147,24 @@ The voucher crypto is pure-Python (no native dependency) and is the normative
 reference for the scheme — see [PROTOCOL.md §4](https://github.com/Kali123411/k402/blob/main/PROTOCOL.md). The channel
 covenant (`channel.sil`) and its on-chain tooling live in the k402 repo.
 
+## Pay in kUSD: the kUSD market
+
+Price and settle in kUSD, the covenant-native dollar on Kaspa, on both wires at once (k402's own
+`kusd-utxo` scheme and x402 V2 with kUSD as the asset). The chain work is done by `kusd_pay`, a binary
+from kusd-framework that k402 runs as a subprocess so the key never enters Python:
+
+```python
+from k402 import K402, KusdWallet
+wallet = KusdWallet("/usr/local/bin/kusd_pay", key_file="~/.kusd-market/provider.key",
+                    network="testnet-10", relay_url="http://127.0.0.1:8735")
+k402 = K402(address_provider=..., backend=NodeBackend(...), network="testnet-10",
+            kusd=wallet, kusd_price_cents=5)          # 5¢ a call in kUSD, KAS still accepted
+```
+
+The provider verifies each payment against its own node (the exact holder box, the family's covenant
+id); the registry lists kUSD prices (`currency="kUSD"`, `price_cents`) and ranks them by settled
+cents; `KusdPayer` is the agent side. Design: `DESIGN-kusd-market.md`.
+
 ## Chain backends
 
 | Backend | Use | Notes |

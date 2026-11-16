@@ -35,12 +35,17 @@ class PaymentStore(Protocol):
         """True iff this call transitioned the record from unused to used."""
         ...
 
+    def mark_txid_used(self, txid: str) -> bool:
+        """Consume a payment transaction id (kusd-utxo replay protection); True exactly once."""
+        ...
+
 
 class MemoryStore:
     """Process-local store. Fine for a single-worker dev server."""
 
     def __init__(self):
         self._records: dict[str, PaymentRecord] = {}
+        self._txids: set[str] = set()
         self._lock = threading.Lock()
 
     def create(self, record: PaymentRecord) -> None:
@@ -57,6 +62,13 @@ class MemoryStore:
             if rec is None or rec.used:
                 return False
             rec.used = True
+            return True
+
+    def mark_txid_used(self, txid: str) -> bool:
+        with self._lock:
+            if txid in self._txids:
+                return False
+            self._txids.add(txid)
             return True
 
 
@@ -81,6 +93,7 @@ class SqliteStore:
             # values; EVM rails use fresh dbs created with the TEXT schema above)
             if "baseline" not in {r[1] for r in c.execute("PRAGMA table_info(k402_payments)")}:
                 c.execute("ALTER TABLE k402_payments ADD COLUMN baseline TEXT NOT NULL DEFAULT '0'")
+            c.execute("CREATE TABLE IF NOT EXISTS k402_txids (txid TEXT PRIMARY KEY)")
 
     def _conn(self) -> sqlite3.Connection:
         conn = getattr(self._local, "conn", None)
@@ -113,4 +126,8 @@ class SqliteStore:
         cur = self._conn().execute(
             "UPDATE k402_payments SET used=1 WHERE payment_id=? AND used=0",
             (payment_id,))
+        return cur.rowcount == 1
+
+    def mark_txid_used(self, txid: str) -> bool:
+        cur = self._conn().execute("INSERT OR IGNORE INTO k402_txids (txid) VALUES (?)", (txid,))
         return cur.rowcount == 1

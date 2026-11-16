@@ -16,6 +16,7 @@ SCHEME_SESSION = "kaspa-session"
 SCHEME_BLOCKBOOK = "blockbook-utxo"
 SCHEME_EVM = "evm"
 SCHEME_CHANNEL = "kaspa-channel"
+SCHEME_KUSD = "kusd-utxo"
 
 
 class ProtocolError(ValueError):
@@ -100,6 +101,41 @@ class UtxoOffer:
         if self.facilitator_fee:
             total += int(self.facilitator_fee.sompi)
         return total
+
+
+@dataclass
+class KusdOffer:
+    """kusd-utxo: a per-call payment in kUSD — a holder box of exactly `amount_cents` owned by
+    `pay_to_pubkey` (x-only) in the kUSD family `authority` (the authority's covenant id), proven by the
+    creating txid. The provider verifies it against its own node (DESIGN-kusd-market.md §1)."""
+    network: str
+    amount_cents: str
+    pay_to_pubkey: str
+    authority: str
+    payment_id: str
+    expires: int
+    description: str = ""
+    scheme: str = field(default=SCHEME_KUSD, init=False)
+
+    def to_dict(self) -> dict:
+        d: dict[str, Any] = {
+            "scheme": self.scheme, "network": self.network, "amount_cents": str(self.amount_cents),
+            "pay_to_pubkey": self.pay_to_pubkey, "authority": self.authority,
+            "payment_id": self.payment_id, "expires": self.expires,
+        }
+        if self.description:
+            d["description"] = self.description
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "KusdOffer":
+        try:
+            cents = str(d["amount_cents"])
+            int(cents)
+            return cls(network=d["network"], amount_cents=cents, pay_to_pubkey=d["pay_to_pubkey"], authority=d["authority"],
+                       payment_id=d["payment_id"], expires=int(d["expires"]), description=d.get("description", ""))
+        except (KeyError, TypeError, ValueError) as e:
+            raise ProtocolError(f"invalid kusd-utxo offer: {e}") from e
 
 
 @dataclass
@@ -286,7 +322,7 @@ Offer = UtxoOffer | SessionOffer | BlockbookOffer | EvmOffer | ChannelOffer
 
 _SCHEME_TYPES = {SCHEME_UTXO: UtxoOffer, SCHEME_SESSION: SessionOffer,
                  SCHEME_BLOCKBOOK: BlockbookOffer, SCHEME_EVM: EvmOffer,
-                 SCHEME_CHANNEL: ChannelOffer}
+                 SCHEME_CHANNEL: ChannelOffer, SCHEME_KUSD: KusdOffer}
 
 
 def payment_required_body(offers: list[Offer]) -> dict:
