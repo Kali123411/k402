@@ -156,6 +156,7 @@ from kusd-framework that k402 runs as a subprocess so the key never enters Pytho
 ```python
 from k402 import K402, KusdWallet
 wallet = KusdWallet("/usr/local/bin/kusd_pay", key_file="~/.kusd-market/provider.key",
+                    authority="<kUSD authority covenant id>",     # pins the family; the relay is only a cache
                     network="testnet-10", relay_url="http://127.0.0.1:8735")
 k402 = K402(address_provider=..., backend=NodeBackend(...), network="testnet-10",
             kusd=wallet, kusd_price_cents=5)          # 5¢ a call in kUSD, KAS still accepted

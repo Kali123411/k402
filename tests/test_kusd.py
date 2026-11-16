@@ -21,7 +21,7 @@ def keyfile(tmp_path, mode=0o600):
 def wallet(tmp_path, results, mode=0o600, monkeypatch=None):
     monkeypatch.setenv("FAKE_KUSD_RESULTS", json.dumps(results))
     monkeypatch.setenv("FAKE_KUSD_LOG", str(tmp_path / "log"))
-    return KusdWallet(bin_path=FAKE, key_file=keyfile(tmp_path, mode), relay_url="http://relay.test", network="testnet-10")
+    return KusdWallet(bin_path=FAKE, key_file=keyfile(tmp_path, mode), relay_url="http://relay.test", network="testnet-10", authority="06" * 32)
 
 
 def test_wallet_parses_bin_json(tmp_path, monkeypatch):
@@ -60,3 +60,19 @@ def test_bin_failure_is_a_kusd_error(tmp_path, monkeypatch):
     w = wallet(tmp_path, {"send": {"error": "refused before signing: not enough kUSD"}, "send_exit": 1}, monkeypatch=monkeypatch)
     with pytest.raises(KusdError, match="not enough kUSD"):
         w.send("ea" * 32, 5)
+
+
+def test_wallet_pins_the_family_and_never_asks_for_the_rest_fallback(tmp_path, monkeypatch):
+    # the binary verifies on a node only (plain KAS at the box address has no covenant id); the family is
+    # pinned by KUSD_AUTHORITY so a relay cannot substitute its own protocol boxes
+    monkeypatch.setenv("KUSD_AUTHORITY", "ff" * 32)   # a stale environment value never leaks through
+    w = KusdWallet(bin_path=FAKE, key_file=keyfile(tmp_path, 0o600), relay_url="http://relay.test",
+                   network="testnet-10", authority="06" * 32)
+    env = w._env(False)
+    assert env["KUSD_AUTHORITY"] == "06" * 32
+    log = tmp_path / "argv.log"
+    monkeypatch.setenv("FAKE_KUSD_LOG", str(log))
+    monkeypatch.setenv("FAKE_KUSD_RESULTS", json.dumps({"verify": {"ok": True, "index": 0, "daa": 1}}))
+    w.verify("ab" * 32, "cd" * 32, 5, "06" * 32, 0)
+    assert "--api" not in log.read_text()
+    assert not hasattr(w, "api_fallback")

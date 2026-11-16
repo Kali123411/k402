@@ -30,6 +30,7 @@ class RouteResult:
     response: httpx.Response
     provider: dict
     attempts: list = field(default_factory=list)
+    result: object = None   # the payer's own record of the winning payment (KusdPayer: a PayResult)
 
 
 class RouteError(RuntimeError):

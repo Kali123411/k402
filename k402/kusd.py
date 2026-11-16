@@ -35,15 +35,18 @@ class VerifyResult:
 
 
 class KusdWallet:
-    def __init__(self, bin_path: str, key_file: Optional[str] = None, *, node_url: Optional[str] = None,
-                 relay_url: Optional[str] = None, network: str = "testnet-10", api_fallback: Optional[str] = None,
-                 timeout: float = 180.0):
+    def __init__(self, bin_path: str, key_file: Optional[str] = None, *, authority: str, node_url: Optional[str] = None,
+                 relay_url: Optional[str] = None, network: str = "testnet-10", timeout: float = 180.0):
+        # `authority` pins the kUSD family (the authority covenant id): the relay the binary reads is a cache,
+        # and only protocol boxes of this authority count. Verification is on the node only.
+        if len(authority) != 64 or not all(c in "0123456789abcdefABCDEF" for c in authority):
+            raise KusdError("authority must be the kUSD authority covenant id (64 hex)")
         self.bin_path = bin_path
         self.key_file = key_file
+        self.authority = authority.lower()
         self.node_url = node_url
         self.relay_url = relay_url
         self.network = network
-        self.api_fallback = api_fallback
         self.timeout = timeout
         self._family: Optional[Family] = None
         self._xonly: Optional[str] = None
@@ -52,6 +55,7 @@ class KusdWallet:
     def _env(self, needs_key: bool) -> dict:
         env = {k: v for k, v in os.environ.items() if not k.startswith("KUSD_")}
         env["KUSD_NETWORK"] = self.network
+        env["KUSD_AUTHORITY"] = self.authority
         if self.node_url:
             env["KUSD_NODE_URL"] = self.node_url
         if self.relay_url:
@@ -96,10 +100,7 @@ class KusdWallet:
         return self._run("send", "--to", to_xonly, "--cents", str(int(cents)), needs_key=True)
 
     def verify(self, txid: str, to_xonly: str, cents: int, authority: str, since_daa: int) -> VerifyResult:
-        args = ["verify", "--txid", txid, "--to", to_xonly, "--cents", str(int(cents)), "--authority", authority, "--since-daa", str(int(since_daa))]
-        if self.api_fallback:
-            args += ["--api", self.api_fallback]
-        r = self._run(*args)
+        r = self._run("verify", "--txid", txid, "--to", to_xonly, "--cents", str(int(cents)), "--authority", authority, "--since-daa", str(int(since_daa)))
         return VerifyResult(ok=bool(r.get("ok")), reason=r.get("reason", ""), index=r.get("index"), daa=r.get("daa"),
                             retryable=bool(r.get("retryable", False)) and not r.get("ok", False))
 

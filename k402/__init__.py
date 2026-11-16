@@ -20,6 +20,7 @@ from .server import K402, PaymentRequired
 from .store import MemoryStore, PaymentRecord, PaymentStore, SqliteStore
 from .kusd import Family as KusdFamily, KusdError, KusdWallet, VerifyResult as KusdVerifyResult
 from .schemes import SCHEME_KUSD, KusdOffer
+from .kusd_client import KusdPayer, Outlay as KusdOutlay, PayResult as KusdPayResult
 
 __version__ = "0.8.0"
 
@@ -41,6 +42,7 @@ __all__ = [
     "CallbackAddressProvider", "StaticAddressProvider",
     "PaymentStore", "MemoryStore", "SqliteStore", "PaymentRecord",
     "KusdWallet", "KusdError", "KusdFamily", "KusdVerifyResult", "KusdOffer", "SCHEME_KUSD",
+    "KusdPayer", "KusdOutlay", "KusdPayResult",
     "Payer",
 ]
 
