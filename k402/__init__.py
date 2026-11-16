@@ -18,6 +18,10 @@ from .schemes import (K402_VERSION, PAYMENT_HEADER, SESSION_HEADER,
                       parse_payment_header, payment_required_body)
 from .server import K402, PaymentRequired
 from .store import MemoryStore, PaymentRecord, PaymentStore, SqliteStore
+from .kusd import Family as KusdFamily, KusdError, KusdWallet, VerifyResult as KusdVerifyResult
+from .schemes import SCHEME_KUSD, KusdOffer
+from .kusd_client import KusdPayer, Outlay as KusdOutlay, PayResult as KusdPayResult, PaymentSent as KusdPaymentSent
+from .kusd_keys import derive_payee as kusd_derive_payee, offer_tweak as kusd_offer_tweak
 
 __version__ = "0.8.0"
 
@@ -38,6 +42,8 @@ __all__ = [
     "AddressProvider", "XpubAddressProvider", "Bip32AddressProvider",
     "CallbackAddressProvider", "StaticAddressProvider",
     "PaymentStore", "MemoryStore", "SqliteStore", "PaymentRecord",
+    "KusdWallet", "KusdError", "KusdFamily", "KusdVerifyResult", "KusdOffer", "SCHEME_KUSD",
+    "KusdPayer", "KusdOutlay", "KusdPayResult", "KusdPaymentSent", "kusd_derive_payee", "kusd_offer_tweak",
     "Payer",
 ]
 

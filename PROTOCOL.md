@@ -238,6 +238,36 @@ marked experimental until the covenant is audited; services SHOULD cap
 for the full threat analysis and the covenant audit checklist. Conformance vectors for the voucher
 wire format are in `tests/vectors/channel_vouchers.json`.
 
+### `kusd-utxo` — per-call payment in kUSD (and the same offer as an x402 asset)
+
+kUSD is a covenant-native USD stablecoin on Kaspa (`kusd-framework`). A `kusd-utxo` payment is a
+kUSD **holder box** of exactly `amount_cents`, owned by the offer's payee key, in the kUSD family
+named by `authority` (the kUSD authority's covenant id, kUSD's on-chain identity). The payee key is
+the provider's listed x-only key tweaked by `tagged_hash("k402/kusd-offer", payment_id)` (BIP340
+x-only tweak, `k402.kusd_keys.derive_payee`): a box's address depends only on (cents, owner, family),
+so the per-offer key is what binds a payment to its offer — a payer checks `pay_to_pubkey` against
+the listing, and nobody can present another payer's box under their own payment_id. Offer:
+
+```json
+{ "scheme": "kusd-utxo", "network": "testnet-10", "amount_cents": "5",
+  "pay_to_pubkey": "<payee x-only hex>", "authority": "<authority covenant id hex>",
+  "payment_id": "p_…", "expires": 1794800000, "description": "summarize: 1 call" }
+```
+
+Header: `X-K402-Payment: kusd-utxo <txid> <payment_id>`. The payer builds the box with
+`kusd-client`'s `send` (one box to the recipient, change back); the provider verifies against **its
+own node**: it recomputes the holder box's address for exactly `amount_cents` to `pay_to_pubkey` and
+requires a UTXO there whose outpoint's transaction is `<txid>`, whose covenant id is `authority`,
+accepted at or after the offer's DAA score. The amount sits behind the box's script hash, so only the
+exact amount is recognisable (a wrong amount reads as "not indexed yet" until the quote expires);
+plain KAS sent to the same address has no covenant id and is not a payment. Each txid (canonical
+lowercase hex) is consumed once, and a payment must cover the price of the route it is presented
+to. Every kUSD box carries ≥ 1 KAS of KAS (1.5 KAS new), which the recipient also owns.
+
+The same offer is carried on the x402 V2 wire (`PAYMENT-REQUIRED`) as scheme `exact`, network
+`kaspa:testnet-10` / `kaspa:mainnet`, `asset` = the authority covenant id, `amount` in cents,
+`extra.binding = "kusd-holder-v1"` — see `scheme_exact_kusd.md`. One provider serves both.
+
 ## 5. Verification (`kaspa-utxo`)
 
 On receiving the payment header the server:

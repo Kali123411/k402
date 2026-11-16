@@ -10,13 +10,17 @@
 # registry federation are documented next steps (PLAN-service-exchange-v1.md).
 # NOTE: no `from __future__ import annotations` here — FastAPI must see the real Request type on the
 # route handlers (a stringified annotation makes it treat `request` as a query param).
+import asyncio
 import json
 import sqlite3
 import threading
 import time
 from typing import Optional
 
+from .kusd import KusdError
+from .kusd_keys import derive_payee
 from .registry import Listing
+from .schemes import SCHEME_KUSD, ProtocolError, parse_payment_header
 
 
 def _payee_address(payee_pubkey: str, network: str) -> str:
@@ -56,10 +60,32 @@ async def _outpoint_exists(backend, address: str, outpoint: str) -> Optional[int
     return None
 
 
+def rank_key(p: dict, currency: Optional[str], oracle_price: Optional[int]) -> tuple:
+    """Sort key for search results (ascending): settled volume first, then price, then age. Within one
+    currency the volume is that currency's; across currencies it is USD value, KAS at the oracle price
+    (1e-4 USD per KAS, the kUSD oracle's unit). A registry without an oracle price ranks KAS volume as
+    before (by KAS); it should carry one as soon as it lists kUSD, or the two are not comparable."""
+    rep = p["reputation"]
+    if currency == "KAS":
+        vol = rep["settled_kas"]
+    elif currency == "kUSD":
+        vol = rep.get("settled_cents", 0)
+    else:
+        vol = rep.get("settled_cents", 0) / 100 + rep["settled_kas"] * (oracle_price / 1e4 if oracle_price else 1)
+    return (-vol, p["price_usd"], p["listed_at"])
+
+
 def create_registry_app(backend, network: str = "mainnet", db_path: str = "registry.db",
-                        listing_fee_sompi: int = 0, k402=None):
+                        listing_fee_sompi: int = 0, k402=None,
+                        kusd=None, kusd_listing_fee_cents: int = 0, oracle_price: Optional[int] = None):
     """Build the registry FastAPI app. `backend` is a k402 ChainBackend on `network` (used to verify
-    reputation closes + stake outpoints). `network` is the kaspa SDK id ('mainnet' | 'testnet-10')."""
+    reputation closes + stake outpoints). `network` is the kaspa SDK id ('mainnet' | 'testnet-10').
+    `kusd` (a KusdWallet) verifies kUSD settled reports; `kusd_listing_fee_cents` gates kUSD listings behind
+    a kusd-utxo payment to `k402`; `oracle_price` (1e-4 USD/KAS) values KAS volume in mixed-currency rank."""
+    if kusd is not None and not oracle_price:
+        raise ValueError("a registry that lists kUSD needs oracle_price (1e-4 USD per KAS) to rank KAS and kUSD volume together")
+    if kusd_listing_fee_cents > 0 and k402 is None:
+        raise ValueError("kusd_listing_fee_cents needs a k402 (the K402 that issues and verifies the fee offers)")
     from fastapi import FastAPI, Request
     from fastapi.responses import HTMLResponse, JSONResponse
 
@@ -79,11 +105,20 @@ def create_registry_app(backend, network: str = "mainnet", db_path: str = "regis
             description TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (payee_pubkey, capability))""")
         # migrate DBs created before the description column existed
-        if "description" not in {r[1] for r in _c.execute("PRAGMA table_info(listings)")}:
-            _c.execute("ALTER TABLE listings ADD COLUMN description TEXT NOT NULL DEFAULT ''")
+        # each column on its own (autocommit: a crash between two ALTERs must not leave the table half-migrated)
+        cols = {r[1] for r in _c.execute("PRAGMA table_info(listings)")}
+        for name, decl in (("description", "TEXT NOT NULL DEFAULT ''"), ("currency", "TEXT NOT NULL DEFAULT 'KAS'"),
+                           ("price_cents", "INTEGER NOT NULL DEFAULT 0")):
+            if name not in cols:
+                _c.execute(f"ALTER TABLE listings ADD COLUMN {name} {decl}")
+        _c.execute("""CREATE TABLE IF NOT EXISTS settled_kusd (
+            txid TEXT NOT NULL, idx INTEGER NOT NULL, payee_pubkey TEXT NOT NULL, cents INTEGER NOT NULL, t INTEGER,
+            PRIMARY KEY (txid, idx))""")
         _c.execute("""CREATE TABLE IF NOT EXISTS reputation (
             payee_pubkey TEXT PRIMARY KEY, settled_sompi INTEGER NOT NULL DEFAULT 0,
             close_count INTEGER NOT NULL DEFAULT 0, first_settled INTEGER, last_settled INTEGER)""")
+        if "settled_cents" not in {r[1] for r in _c.execute("PRAGMA table_info(reputation)")}:
+            _c.execute("ALTER TABLE reputation ADD COLUMN settled_cents INTEGER NOT NULL DEFAULT 0")
         _c.execute("""CREATE TABLE IF NOT EXISTS settled_closes (
             close_txid TEXT PRIMARY KEY, payee_pubkey TEXT NOT NULL, sompi INTEGER NOT NULL, t INTEGER)""")
 
@@ -91,28 +126,30 @@ def create_registry_app(backend, network: str = "mainnet", db_path: str = "regis
 
     def _rep(payee_pubkey: str) -> dict:
         with db() as c:
-            row = c.execute("SELECT settled_sompi, close_count, first_settled, last_settled "
+            row = c.execute("SELECT settled_sompi, close_count, first_settled, last_settled, settled_cents "
                             "FROM reputation WHERE payee_pubkey=?", (payee_pubkey,)).fetchone()
         if not row:
-            return {"settled_kas": 0.0, "closes": 0, "first_settled": None, "last_settled": None}
-        return {"settled_kas": round(row[0] / 1e8, 4), "closes": row[1],
+            return {"settled_kas": 0.0, "settled_cents": 0, "closes": 0, "first_settled": None, "last_settled": None}
+        return {"settled_kas": round(row[0] / 1e8, 4), "settled_cents": row[4], "closes": row[1],
                 "first_settled": row[2], "last_settled": row[3]}
 
     # ---------------------------------------------------------------- list / delist
     @app.post("/registry/list")
     async def register(request: Request):
-        # optional listing-fee gate (dogfoods the payment rail; off by default in v1)
-        if listing_fee_sompi > 0 and k402 is not None:
-            hdr = request.headers.get("X-K402-Payment")
-            if not hdr:
-                from .server import PaymentRequired
-                raise PaymentRequired([await k402.create_offer(listing_fee_sompi, "registry listing")],
-                                      "listing fee required")
-            await k402.verify(hdr, listing_fee_sompi, "registry listing")
         try:
             listing = Listing.from_dict(await request.json())
         except (KeyError, TypeError, ValueError) as e:
             return JSONResponse({"error": f"bad listing: {e}"}, status_code=400)
+        # everything about the listing is checked BEFORE any fee is taken: a fee must never buy a 400
+        if listing.currency not in ("KAS", "kUSD"):
+            return JSONResponse({"error": "currency must be KAS or kUSD"}, status_code=400)
+        if listing.currency == "kUSD":
+            if listing.price_cents <= 0:
+                return JSONResponse({"error": "a kUSD listing needs price_cents > 0"}, status_code=400)
+            if abs(listing.price_usd - listing.price_cents / 100) > 1e-9:
+                return JSONResponse({"error": "a kUSD listing's price_usd must equal price_cents / 100"}, status_code=400)
+            if SCHEME_KUSD not in listing.schemes:
+                return JSONResponse({"error": f"a kUSD listing must accept the '{SCHEME_KUSD}' scheme"}, status_code=400)
         if not listing.verify():
             return JSONResponse({"error": "signature invalid — sign the canonical listing with the "
                                           "payee key"}, status_code=400)
@@ -128,12 +165,33 @@ def create_registry_app(backend, network: str = "mainnet", db_path: str = "regis
                 return JSONResponse({"error": "stake_outpoint not found on the payee address"},
                                     status_code=400)
             stake_sompi = v
+        # optional listing-fee gates (dogfood the payment rails): KAS listings pay listing_fee_sompi in KAS,
+        # kUSD listings pay kusd_listing_fee_cents in kUSD (kusd-utxo only); each off when 0
+        if listing.currency == "kUSD" and kusd_listing_fee_cents > 0:
+            hdr = k402.payment_header(request.headers)
+            try:
+                scheme = parse_payment_header(hdr)[0] if hdr else None
+            except ProtocolError:
+                scheme = None
+            if scheme != SCHEME_KUSD:
+                raise await k402.demand(0, "registry listing", "listing fee required: the kUSD listing fee is paid in kUSD (kusd-utxo)",
+                                        cents=kusd_listing_fee_cents)
+            await k402.verify(hdr, 0, "registry listing", cents=kusd_listing_fee_cents)
+        elif listing.currency == "KAS" and listing_fee_sompi > 0 and k402 is not None:
+            hdr = k402.payment_header(request.headers)
+            if not hdr:
+                raise await k402.demand(listing_fee_sompi, "registry listing", "listing fee required")
+            payment = await k402.verify(hdr, listing_fee_sompi, "registry listing")
+            if payment.meta.get("scheme") == SCHEME_KUSD or payment.amount_sompi < listing_fee_sompi:
+                raise await k402.demand(listing_fee_sompi, "registry listing", "listing fee required: the KAS listing fee is paid in KAS")
         with _lock, db() as c:
-            c.execute("""INSERT OR REPLACE INTO listings VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            c.execute("""INSERT OR REPLACE INTO listings (payee_pubkey, capability, endpoint, price_usd, network, schemes,
+                         channel_terms, stake_outpoint, stake_sompi, meta, listed_at, sig, description, currency, price_cents)
+                         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                       (listing.payee_pubkey, listing.capability, listing.endpoint, listing.price_usd,
                        listing.network, json.dumps(listing.schemes), json.dumps(listing.channel_terms),
                        listing.stake_outpoint, stake_sompi, json.dumps(listing.meta),
-                       listing.listed_at, listing.sig, listing.description))
+                       listing.listed_at, listing.sig, listing.description, listing.currency, listing.price_cents))
         return {"ok": True, "payee_pubkey": listing.payee_pubkey, "capability": listing.capability,
                 "stake_sompi": stake_sompi}
 
@@ -154,9 +212,11 @@ def create_registry_app(backend, network: str = "mainnet", db_path: str = "regis
     # ---------------------------------------------------------------- search / provider
     @app.get("/registry/search")
     def search(capability: str = "", max_price_usd: float = 0, min_reputation_kas: float = 0,
-               network_filter: str = "", limit: int = 20):
+               network_filter: str = "", limit: int = 20, currency: str = "", min_settled_cents: int = 0):
         q = "SELECT * FROM listings WHERE 1=1"
         args: list = []
+        if currency:
+            q += " AND currency=?"; args.append(currency)
         if capability:
             q += " AND capability=?"; args.append(capability)
         if max_price_usd:
@@ -167,7 +227,7 @@ def create_registry_app(backend, network: str = "mainnet", db_path: str = "regis
         out = []
         for r in rows:
             rep = _rep(r["payee_pubkey"])
-            if rep["settled_kas"] < min_reputation_kas:
+            if rep["settled_kas"] < min_reputation_kas or rep["settled_cents"] < min_settled_cents:
                 continue
             out.append({
                 "capability": r["capability"], "endpoint": r["endpoint"],
@@ -176,9 +236,10 @@ def create_registry_app(backend, network: str = "mainnet", db_path: str = "regis
                 "channel_terms": json.loads(r["channel_terms"]),
                 "stake_kas": round((r["stake_sompi"] or 0) / 1e8, 4),
                 "description": r.get("description", ""),
+                "currency": r.get("currency", "KAS"), "price_cents": r.get("price_cents", 0),
                 "meta": json.loads(r["meta"]), "listed_at": r["listed_at"], "reputation": rep})
         # rank: reputation (settled volume) desc, then price asc, then oldest listing (proven longer)
-        out.sort(key=lambda x: (-x["reputation"]["settled_kas"], x["price_usd"], x["listed_at"]))
+        out.sort(key=lambda x: rank_key(x, currency or None, oracle_price))
         return {"providers": out[:limit], "count": len(out)}
 
     @app.get("/registry/provider/{payee_pubkey}")
@@ -193,6 +254,7 @@ def create_registry_app(backend, network: str = "mainnet", db_path: str = "regis
                 "address": _payee_address(payee_pubkey, network),
                 "listings": [{"capability": r["capability"], "endpoint": r["endpoint"],
                               "price_usd": r["price_usd"], "meta": json.loads(r["meta"]),
+                              "currency": r.get("currency", "KAS"), "price_cents": r.get("price_cents", 0),
                               "description": r.get("description", ""),
                               "listed_at": r["listed_at"]} for r in rows]}
 
@@ -203,6 +265,12 @@ def create_registry_app(backend, network: str = "mainnet", db_path: str = "regis
         credits settled volume. Providers can't inflate (we check the tx); omitting closes only
         hurts their own reputation."""
         payee_pubkey = str(req.get("payee_pubkey", "")).lower()
+        if "txid" in req or "cents" in req:
+            try:
+                cents = int(req.get("cents"))
+            except (TypeError, ValueError):
+                return JSONResponse({"error": "cents must be an integer"}, status_code=400)
+            return await settled_kusd(payee_pubkey, str(req.get("txid", "")).lower(), cents, str(req.get("payment_id", "")))
         close_txid = str(req.get("close_txid", "")).lower()
         if len(bytes.fromhex(payee_pubkey or "x")) != 32 or not close_txid:
             return JSONResponse({"error": "payee_pubkey (32-byte hex) and close_txid required"},
@@ -229,6 +297,43 @@ def create_registry_app(backend, network: str = "mainnet", db_path: str = "regis
                            close_count=close_count+1, last_settled=excluded.last_settled""",
                       (payee_pubkey, sompi, now, now))
         return {"ok": True, "credited_sompi": sompi, "reputation": _rep(payee_pubkey)}
+
+    async def settled_kusd(payee_pubkey: str, txid: str, cents: int, payment_id: str):
+        """A kUSD payment, verified through the wallet: the holder box of exactly `cents` created by `txid`,
+        owned by the payee's listed key tweaked by the offer's `payment_id` (kusd_keys), still unspent on the
+        node — so providers report before they sweep. Credited once per box (txid, index), never per tx."""
+        if kusd is None:
+            return JSONResponse({"error": "this registry does not verify kUSD settlements"}, status_code=400)
+        try:
+            ok_key = len(bytes.fromhex(payee_pubkey)) == 32 and len(bytes.fromhex(txid)) == 32
+        except ValueError:
+            ok_key = False
+        if not ok_key or cents <= 0 or not payment_id:
+            return JSONResponse({"error": "payee_pubkey (32-byte hex), txid (64 hex), cents > 0 and the offer's payment_id required"},
+                                status_code=400)
+        try:
+            box_owner = derive_payee(payee_pubkey, payment_id)
+            r = await asyncio.to_thread(kusd.verify, txid, box_owner, cents, kusd.family().authority, 0)
+        except ValueError:
+            return JSONResponse({"error": "payee_pubkey is not a public key"}, status_code=400)
+        except KusdError as e:
+            return JSONResponse({"error": f"chain unreachable: {e}"}, status_code=502)
+        if not r.ok:
+            if r.retryable:
+                return JSONResponse({"error": f"no unspent kUSD box of {cents} cents for offer {payment_id} from {txid[:8]}… "
+                                              f"(not indexed yet, or already spent — report before spending it): {r.reason}"}, status_code=503)
+            return JSONResponse({"error": f"not a payment of this family: {r.reason}"}, status_code=409)
+        now = int(time.time())
+        with _lock, db() as c:
+            if c.execute("INSERT OR IGNORE INTO settled_kusd VALUES (?,?,?,?,?)", (txid, int(r.index or 0), payee_pubkey, cents, now)).rowcount == 0:
+                return {"ok": True, "already_counted": True}
+            c.execute("""INSERT INTO reputation (payee_pubkey, settled_sompi, settled_cents, close_count, first_settled, last_settled)
+                         VALUES (?,0,?,1,?,?)
+                         ON CONFLICT(payee_pubkey) DO UPDATE SET
+                           settled_cents=settled_cents+excluded.settled_cents,
+                           close_count=close_count+1, last_settled=excluded.last_settled""",
+                      (payee_pubkey, cents, now, now))
+        return {"ok": True, "credited_cents": cents, "reputation": _rep(payee_pubkey)}
 
     @app.get("/healthz")
     def healthz():
