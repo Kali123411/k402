@@ -30,6 +30,9 @@ async def main() -> int:
     ap.add_argument("--from", dest="src", required=True)
     ap.add_argument("--registry", required=True)
     ap.add_argument("--only", default="", help="comma-separated resource URLs to migrate (default: all)")
+    ap.add_argument("--trust-declared", action="store_true",
+                    help="also send the source's payTo and amountSompi, which must then match the live offer; by default only "
+                         "scheme and network are declared and the live offer's terms are listed (the source's figures may be stale)")
     a = ap.parse_args()
     entries = load(a.src)
     only = {u.strip() for u in a.only.split(",") if u.strip()}
@@ -40,8 +43,9 @@ async def main() -> int:
                 continue
             body = {"resource": e.get("resource"), "serviceName": e.get("serviceName") or e.get("name") or e.get("resource"),
                     "description": e.get("description", ""), "capability": e.get("capability", ""), "scheme": e.get("scheme"),
-                    "network": e.get("network"), "payTo": e.get("payTo"), "amountSompi": e.get("amountSompi"),
-                    "tags": e.get("tags") or [], "kind": e.get("kind", "kaspa")}
+                    "network": e.get("network"), "tags": e.get("tags") or [], "kind": e.get("kind", "kaspa")}
+            if a.trust_declared:
+                body.update({"payTo": e.get("payTo"), "amountSompi": e.get("amountSompi")})
             try:
                 r = await http.post(f"{a.registry.rstrip('/')}/registry/submit", json=body)
                 j = r.json()
