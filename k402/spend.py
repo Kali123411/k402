@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
+import threading
+import time
 from dataclasses import dataclass, fields
 from typing import Optional
 
@@ -100,4 +103,151 @@ class SpendPolicy:
             return cls.from_dict(json.load(f))
 
 
-__all__ = ["SpendPolicy", "SpendRefused", "REFUSAL_CODES"]
+_KINDS = ("pay", "topup")
+
+
+class SpendLedger:
+    """Every spend the payer made or reserved, in sqlite (`":memory:"` for tests). The bounds are measured
+    against this, never against process memory, so a restart cannot reset a budget. One connection, one lock,
+    and `reserve` runs its checks and its insert in a single BEGIN IMMEDIATE transaction, so two concurrent
+    payments cannot both pass the same remaining budget."""
+
+    def __init__(self, path: str):
+        self.path = path
+        self._lock = threading.Lock()
+        self._c = sqlite3.connect(path, check_same_thread=False, isolation_level=None, timeout=30)
+        self._c.row_factory = sqlite3.Row
+        with self._lock:
+            self._c.execute("PRAGMA busy_timeout=30000")
+            self._c.execute("""CREATE TABLE IF NOT EXISTS spend (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, kind TEXT NOT NULL,
+                provider TEXT NOT NULL DEFAULT '', capability TEXT NOT NULL DEFAULT '',
+                cents INTEGER NOT NULL, kas_sompi INTEGER NOT NULL DEFAULT 0,
+                txid TEXT NOT NULL DEFAULT '', http INTEGER, state TEXT NOT NULL)""")
+            self._c.execute("CREATE INDEX IF NOT EXISTS spend_ts ON spend(ts)")
+            self._c.execute("CREATE TABLE IF NOT EXISTS spend_control (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+
+    def close(self) -> None:
+        with self._lock:
+            self._c.close()
+
+    # -------- the kill switch --------
+    @property
+    def frozen(self) -> bool:
+        with self._lock:
+            return self._frozen()
+
+    def _frozen(self) -> bool:
+        r = self._c.execute("SELECT value FROM spend_control WHERE key='frozen'").fetchone()
+        return bool(r) and r["value"] == "1"
+
+    def freeze(self) -> None:
+        with self._lock:
+            self._c.execute("INSERT OR REPLACE INTO spend_control(key, value) VALUES ('frozen', '1')")
+
+    def unfreeze(self) -> None:
+        with self._lock:
+            self._c.execute("INSERT OR REPLACE INTO spend_control(key, value) VALUES ('frozen', '0')")
+
+    # -------- sums --------
+    def _sums(self, policy: SpendPolicy, now: float) -> dict:
+        since = now - policy.window_seconds
+        q = lambda sql, *a: self._c.execute(sql, a).fetchone()[0] or 0   # noqa: E731
+        return {
+            "frozen": self._frozen(),
+            "total_cents": int(q("SELECT SUM(cents) FROM spend WHERE kind='pay' AND state!='void'")),
+            "window": {
+                "seconds": policy.window_seconds,
+                "cents": int(q("SELECT SUM(cents) FROM spend WHERE kind='pay' AND state!='void' AND ts>?", since)),
+                "calls": int(q("SELECT COUNT(*) FROM spend WHERE kind='pay' AND state!='void' AND ts>?", since)),
+                "topup_cents": int(q("SELECT SUM(cents) FROM spend WHERE kind='topup' AND state!='void' AND ts>?", since)),
+                "failures": int(q("SELECT COUNT(*) FROM spend WHERE kind='pay' AND state='sent' AND http>=400 AND ts>?", since)),
+            },
+        }
+
+    @staticmethod
+    def _remaining(policy: SpendPolicy, s: dict) -> dict:
+        w = s["window"]
+        left = lambda mx, used: None if mx is None else max(0, mx - used)   # noqa: E731
+        return {"total_cents": left(policy.max_total_cents, s["total_cents"]),
+                "window_cents": left(policy.max_window_cents, w["cents"]),
+                "window_calls": left(policy.max_window_calls, w["calls"]),
+                "window_topup_cents": left(policy.max_window_topup_cents, w["topup_cents"]),
+                "window_failures": left(policy.max_window_failures, w["failures"])}
+
+    def _status(self, policy: SpendPolicy, now: float) -> dict:
+        s = self._sums(policy, now)
+        s["remaining"] = self._remaining(policy, s)
+        s["policy"] = policy.to_dict()
+        return s
+
+    def status(self, policy: SpendPolicy, now: Optional[float] = None) -> dict:
+        """frozen, lifetime total, the window's sums, what is left on each bounded axis, and the policy."""
+        with self._lock:
+            return self._status(policy, time.time() if now is None else now)
+
+    # -------- reserve → settle | void --------
+    def reserve(self, policy: SpendPolicy, *, kind: str, cents: int, provider: str = "", capability: str = "",
+                kas_sompi: int = 0, now: Optional[float] = None) -> int:
+        """Check every bound and record the spend as `reserved`, atomically. Raises SpendRefused (no row) when
+        a bound would be crossed. `kind` is "pay" (kUSD to a provider) or "topup" (kUSD bought through the PSM)."""
+        if kind not in _KINDS:
+            raise ValueError(f"kind must be one of {_KINDS}")
+        cents = int(cents)
+        if cents < 0:
+            raise ValueError("cents must be non-negative")
+        now = time.time() if now is None else float(now)
+        with self._lock:
+            self._c.execute("BEGIN IMMEDIATE")
+            try:
+                s = self._status(policy, now)
+                w = s["window"]
+                if s["frozen"]:
+                    raise SpendRefused("frozen", "the operator froze this agent's spending", s)
+                if policy.max_window_failures is not None and w["failures"] >= policy.max_window_failures:
+                    raise SpendRefused("failures", f"{w['failures']} paid call(s) in the last {policy.window_seconds}s were not served "
+                                       f"(limit {policy.max_window_failures}); not paying anyone until the window clears", s)
+                if kind == "pay":
+                    if policy.max_total_cents is not None and s["total_cents"] + cents > policy.max_total_cents:
+                        raise SpendRefused("total", f"{cents}¢ would take the lifetime total to {s['total_cents'] + cents}¢, "
+                                           f"over the budget of {policy.max_total_cents}¢", s)
+                    if policy.max_window_cents is not None and w["cents"] + cents > policy.max_window_cents:
+                        raise SpendRefused("window_cents", f"{cents}¢ would take the last {policy.window_seconds}s to {w['cents'] + cents}¢, "
+                                           f"over the limit of {policy.max_window_cents}¢", s)
+                    if policy.max_window_calls is not None and w["calls"] + 1 > policy.max_window_calls:
+                        raise SpendRefused("window_calls", f"{w['calls']} paid call(s) in the last {policy.window_seconds}s already "
+                                           f"(limit {policy.max_window_calls})", s)
+                else:
+                    if policy.max_window_topup_cents is not None and w["topup_cents"] + cents > policy.max_window_topup_cents:
+                        raise SpendRefused("topup", f"buying {cents}¢ of kUSD would take the last {policy.window_seconds}s to "
+                                           f"{w['topup_cents'] + cents}¢ of top-ups, over the limit of {policy.max_window_topup_cents}¢", s)
+                cur = self._c.execute("INSERT INTO spend(ts, kind, provider, capability, cents, kas_sompi, state) VALUES (?,?,?,?,?,?,'reserved')",
+                                      (now, kind, provider or "", capability or "", cents, int(kas_sompi)))
+                self._c.execute("COMMIT")
+                return int(cur.lastrowid)
+            except BaseException:
+                self._c.execute("ROLLBACK")
+                raise
+
+    def settle(self, spend_id: int, *, txid: str = "", http: Optional[int] = None, kas_sompi: Optional[int] = None) -> None:
+        """The money moved: record the txid, later the HTTP status the provider answered with, and the KAS
+        actually spent once known. May be called more than once for the same row."""
+        with self._lock:
+            self._c.execute("UPDATE spend SET state='sent', txid=CASE WHEN ?='' THEN txid ELSE ? END, "
+                            "http=COALESCE(?, http), kas_sompi=COALESCE(?, kas_sompi) WHERE id=?",
+                            (txid, txid, http, kas_sompi, int(spend_id)))
+
+    def void(self, spend_id: int) -> None:
+        """The reservation never became a payment (refused before signing): it no longer counts."""
+        with self._lock:
+            self._c.execute("UPDATE spend SET state='void' WHERE id=?", (int(spend_id),))
+
+    def history(self, limit: int = 20) -> list:
+        """Newest first."""
+        with self._lock:
+            rows = self._c.execute("SELECT id, ts, kind, provider, capability, cents, kas_sompi, txid, http, state FROM spend "
+                                   "ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
+        return [dict(r) for r in rows]
+
+
+__all__ = ["SpendPolicy", "SpendLedger", "SpendRefused", "REFUSAL_CODES"]
