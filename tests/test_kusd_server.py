@@ -111,7 +111,8 @@ def test_kusd_offer_in_402_on_both_wires(rig):
     assert (req["scheme"], req["network"], req["amount"], req["asset"], req["payTo"]) == ("exact", "kaspa:testnet-10", "5", AUTH, pay_to)
     assert req["extra"]["assetSymbol"] == "kUSD" and req["extra"]["decimals"] == 2 and req["extra"]["binding"] == "kusd-holder-v1"
     assert req["extra"]["payment_id"] == o["payment_id"]
-    assert 0 < req["maxTimeoutSeconds"] <= o["expires"] - int(time.time()), "the timeout is the quote's remaining life"
+    # the remaining life is measured a moment after the offer was issued: allow the clock to tick between the two
+    assert 0 < req["maxTimeoutSeconds"] <= o["expires"] - int(time.time()) + 2, "the timeout is the quote's remaining life"
 
 
 def test_kas_and_kusd_offers_coexist(rig):
