@@ -6,13 +6,15 @@
 #   uvicorn --app-dir examples kusd_provider:app --host 0.0.0.0 --port 8792
 #
 # Env (besides kusd_common's): PRICE_CENTS (5), PRICE_SOMPI (KAS alternative, 3_000_000), K402_REGISTRY
-# (http://127.0.0.1:8791), OLLAMA_URL + SUMMARIZE_MODEL (the model that does the work).
+# (http://127.0.0.1:8791), OLLAMA_URL + SUMMARIZE_MODEL (the model that does the work), CORS_ORIGINS (browser
+# origins that may pay from a page, e.g. the Kaspa Lab market page; the x402 headers are exposed to them).
 import os
 
 import httpx
 from fastapi import Depends, FastAPI
 
-from k402 import PaymentRecord
+from k402 import PaymentRecord, allow_cors
+from k402.cors import origins_from_env
 from k402.schemes import SCHEME_KUSD
 
 from kusd_common import backend, k402_for, wallet
@@ -26,6 +28,7 @@ MODEL = os.environ.get("SUMMARIZE_MODEL", "llama3.1:8b-instruct-q4_K_M")
 w = wallet()
 k402 = k402_for(w, backend(), kusd_price_cents=PRICE_CENTS, kas_price_sompi=PRICE_SOMPI)
 app = FastAPI(title="kUSD market provider — summarize (TN10)")
+allow_cors(app, origins_from_env(os.environ.get("CORS_ORIGINS")))
 k402.install(app)
 http = httpx.AsyncClient(timeout=120)
 

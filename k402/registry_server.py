@@ -77,11 +77,13 @@ def rank_key(p: dict, currency: Optional[str], oracle_price: Optional[int]) -> t
 
 def create_registry_app(backend, network: str = "mainnet", db_path: str = "registry.db",
                         listing_fee_sompi: int = 0, k402=None,
-                        kusd=None, kusd_listing_fee_cents: int = 0, oracle_price: Optional[int] = None):
+                        kusd=None, kusd_listing_fee_cents: int = 0, oracle_price: Optional[int] = None,
+                        cors_origins: Optional[list] = None):
     """Build the registry FastAPI app. `backend` is a k402 ChainBackend on `network` (used to verify
     reputation closes + stake outpoints). `network` is the kaspa SDK id ('mainnet' | 'testnet-10').
     `kusd` (a KusdWallet) verifies kUSD settled reports; `kusd_listing_fee_cents` gates kUSD listings behind
-    a kusd-utxo payment to `k402`; `oracle_price` (1e-4 USD/KAS) values KAS volume in mixed-currency rank."""
+    a kusd-utxo payment to `k402`; `oracle_price` (1e-4 USD/KAS) values KAS volume in mixed-currency rank;
+    `cors_origins` lets browser pages at those origins read the registry (see k402.cors)."""
     if kusd is not None and not oracle_price:
         raise ValueError("a registry that lists kUSD needs oracle_price (1e-4 USD per KAS) to rank KAS and kUSD volume together")
     if kusd_listing_fee_cents > 0 and k402 is None:
@@ -123,6 +125,9 @@ def create_registry_app(backend, network: str = "mainnet", db_path: str = "regis
             close_txid TEXT PRIMARY KEY, payee_pubkey TEXT NOT NULL, sompi INTEGER NOT NULL, t INTEGER)""")
 
     app = FastAPI(title="k402 service registry")
+    if cors_origins:
+        from .cors import allow_cors
+        allow_cors(app, cors_origins)
 
     def _rep(payee_pubkey: str) -> dict:
         with db() as c:
@@ -257,6 +262,21 @@ def create_registry_app(backend, network: str = "mainnet", db_path: str = "regis
                               "currency": r.get("currency", "KAS"), "price_cents": r.get("price_cents", 0),
                               "description": r.get("description", ""),
                               "listed_at": r["listed_at"]} for r in rows]}
+
+    @app.get("/registry/activity")
+    def activity(limit: int = 50):
+        """Verified kUSD settlements, newest first — the market page's live feed. `capability` is the payee's
+        kUSD listing (its first, if several; empty once delisted). Reports are chain-verified before they land
+        here (see /registry/settled), so this is what agents actually paid, not what anyone claimed."""
+        limit = max(1, min(int(limit), 200))
+        with db() as c:
+            rows = c.execute("""SELECT s.t, s.txid, s.idx, s.payee_pubkey, s.cents,
+                                  COALESCE((SELECT capability FROM listings l WHERE l.payee_pubkey=s.payee_pubkey AND l.currency='kUSD'
+                                            ORDER BY l.listed_at LIMIT 1), '')
+                                FROM settled_kusd s ORDER BY s.t DESC, s.rowid DESC LIMIT ?""", (limit,)).fetchall()
+            total = c.execute("SELECT COALESCE(SUM(cents), 0) FROM settled_kusd").fetchone()[0]
+        return {"settlements": [{"t": r[0], "txid": r[1], "idx": r[2], "payee_pubkey": r[3], "cents": r[4], "capability": r[5]} for r in rows],
+                "total_cents": int(total)}
 
     # ---------------------------------------------------------------- reputation (verified closes)
     @app.post("/registry/settled")

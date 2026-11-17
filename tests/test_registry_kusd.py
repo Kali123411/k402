@@ -221,3 +221,67 @@ def test_registry_migrates_a_database_from_before_currencies():
     assert c.post("/registry/list", json=kusd_listing(A_PRIV, A_PUB, 5).to_dict()).status_code == 200
     rows = {p["payee_pubkey"]: p for p in c.get("/registry/search").json()["providers"]}
     assert rows[B_PUB]["currency"] == "KAS" and rows[B_PUB]["price_cents"] == 0 and rows[A_PUB]["currency"] == "kUSD"
+
+
+# ------------------------------------------------------------------ the market page's feed + browser access
+def test_activity_lists_verified_settlements_newest_first():
+    be, w = FakeBackend(), FakeWallet()
+    c = _app(be, w)
+    c.post("/registry/list", json=kusd_listing(A_PRIV, A_PUB, 5).to_dict())
+    c.post("/registry/list", json=kusd_listing(B_PRIV, B_PUB, 9, capability="extract").to_dict())
+    w.boxes[("d3" * 32, derive_payee(A_PUB, "p_1"), 5)] = (624_000_100, 0)
+    w.boxes[("d4" * 32, derive_payee(B_PUB, "p_2"), 9)] = (624_000_200, 1)
+    assert report(c, A_PUB, "d3" * 32, 5, "p_1").json()["ok"]
+    assert report(c, B_PUB, "d4" * 32, 9, "p_2").json()["ok"]
+    got = c.get("/registry/activity").json()
+    assert got["total_cents"] == 14 and [s["txid"] for s in got["settlements"]] == ["d4" * 32, "d3" * 32], "newest first"
+    s = got["settlements"][0]
+    assert s == {"t": s["t"], "txid": "d4" * 32, "idx": 1, "payee_pubkey": B_PUB, "cents": 9, "capability": "extract"}
+    assert isinstance(s["t"], int) and s["t"] > 1_700_000_000
+    assert len(c.get("/registry/activity", params={"limit": 1}).json()["settlements"]) == 1
+    assert c.get("/registry/activity", params={"limit": 999}).json()["settlements"] == got["settlements"], "limit is clamped, never an error"
+    assert c.get("/registry/activity", params={"limit": -3}).status_code == 200
+    # a delisted provider's settlements stay in the feed, with no capability to show
+    assert c.request("DELETE", "/registry/list", json=kusd_listing(B_PRIV, B_PUB, 9, capability="extract").to_dict()).status_code == 200
+    assert c.get("/registry/activity").json()["settlements"][0]["capability"] == ""
+
+
+def test_cors_preflight_allows_x402_headers():
+    app = create_registry_app(FakeBackend(), network="testnet-10", db_path=tempfile.mktemp(suffix=".db"), kusd=FakeWallet(),
+                              oracle_price=268, cors_origins=["https://kaspa-app.vercel.app", "http://localhost:3000"])
+    c = TestClient(app)
+    r = c.options("/registry/search", headers={"Origin": "http://localhost:3000", "Access-Control-Request-Method": "GET",
+                                                "Access-Control-Request-Headers": "payment-signature,content-type"})
+    assert r.status_code == 200 and r.headers["access-control-allow-origin"] == "http://localhost:3000"
+    assert "payment-signature" in r.headers["access-control-allow-headers"].lower()
+    r = c.get("/registry/search", headers={"Origin": "https://kaspa-app.vercel.app"})
+    assert r.headers["access-control-allow-origin"] == "https://kaspa-app.vercel.app"
+    assert "payment-required" in r.headers["access-control-expose-headers"].lower()
+    # an origin the operator did not name gets nothing
+    r = c.get("/registry/search", headers={"Origin": "https://evil.example"})
+    assert "access-control-allow-origin" not in r.headers
+    # the same helper on a provider's own app (what the browser agent talks to)
+    from fastapi import FastAPI
+    from k402 import allow_cors
+    p = FakeProviderApp = FastAPI()
+    allow_cors(p, ["http://localhost:3000"])
+
+    @p.post("/summarize")
+    def summarize():
+        return {"ok": True}
+    pc = TestClient(FakeProviderApp)
+    r = pc.options("/summarize", headers={"Origin": "http://localhost:3000", "Access-Control-Request-Method": "POST",
+                                          "Access-Control-Request-Headers": "payment-signature,x-k402-payment,content-type"})
+    assert r.status_code == 200 and "x-k402-payment" in r.headers["access-control-allow-headers"].lower()
+    r = pc.post("/summarize", json={}, headers={"Origin": "http://localhost:3000"})
+    assert "payment-response" in r.headers["access-control-expose-headers"].lower()
+    # no origins named → the helper is a no-op (no wildcard sneaks in)
+    q = FastAPI()
+    allow_cors(q, [])
+    assert not q.user_middleware
+
+
+def test_registry_without_cors_sends_no_cors_headers():
+    c = _app(FakeBackend(), FakeWallet())
+    r = c.get("/registry/search", headers={"Origin": "http://localhost:3000"})
+    assert "access-control-allow-origin" not in r.headers

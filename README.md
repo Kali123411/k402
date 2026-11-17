@@ -205,6 +205,14 @@ k402-spend --ledger ~/.kusd-market/agent-spend.db history --limit 10
 
 Design: `DESIGN-kusd-spend-controls.md`.
 
+### Browser agents
+
+A web page can be the agent. `allow_cors(app, origins)` (also `create_registry_app(cors_origins=…)`) adds
+CORS for exactly the origins you name, with the x402 headers allowed in (`PAYMENT-SIGNATURE`,
+`X-K402-Payment`) and exposed out (`PAYMENT-REQUIRED`, `PAYMENT-RESPONSE`); without it a browser cannot
+read a quote. `GET /registry/activity?limit=50` lists the registry's chain-verified kUSD settlements,
+newest first, for a live feed. The demo runners read `CORS_ORIGINS` from the environment.
+
 ## Chain backends
 
 | Backend | Use | Notes |

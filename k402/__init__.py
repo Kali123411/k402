@@ -23,8 +23,9 @@ from .schemes import SCHEME_KUSD, KusdOffer
 from .kusd_client import KusdPayer, Outlay as KusdOutlay, PayResult as KusdPayResult, PaymentSent as KusdPaymentSent
 from .kusd_keys import derive_payee as kusd_derive_payee, offer_tweak as kusd_offer_tweak
 from .spend import SpendLedger, SpendPolicy, SpendRefused
+from .cors import allow_cors
 
-__version__ = "0.10.0"
+__version__ = "0.10.1"
 
 __all__ = [
     "K402", "Client", "PaymentRequired", "PaymentFailed",
@@ -45,7 +46,7 @@ __all__ = [
     "PaymentStore", "MemoryStore", "SqliteStore", "PaymentRecord",
     "KusdWallet", "KusdError", "KusdNotRun", "KusdFamily", "KusdVerifyResult", "KusdOffer", "SCHEME_KUSD",
     "KusdPayer", "KusdOutlay", "KusdPayResult", "KusdPaymentSent", "kusd_derive_payee", "kusd_offer_tweak",
-    "SpendPolicy", "SpendLedger", "SpendRefused",
+    "SpendPolicy", "SpendLedger", "SpendRefused", "allow_cors",
     "Payer",
 ]
 
