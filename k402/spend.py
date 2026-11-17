@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import threading
@@ -98,8 +99,8 @@ class SpendPolicy:
 
     @classmethod
     def load(cls, path: str) -> "SpendPolicy":
-        """Read the operator's policy from a JSON file."""
-        with open(path, encoding="utf-8") as f:
+        """Read the operator's policy from a JSON file (`~` expanded)."""
+        with open(os.path.expanduser(path), encoding="utf-8") as f:
             return cls.from_dict(json.load(f))
 
 
@@ -113,6 +114,7 @@ class SpendLedger:
     payments cannot both pass the same remaining budget."""
 
     def __init__(self, path: str):
+        path = path if path == ":memory:" else os.path.expanduser(path)
         self.path = path
         self._lock = threading.Lock()
         self._c = sqlite3.connect(path, check_same_thread=False, isolation_level=None, timeout=30)
@@ -250,4 +252,40 @@ class SpendLedger:
         return [dict(r) for r in rows]
 
 
-__all__ = ["SpendPolicy", "SpendLedger", "SpendRefused", "REFUSAL_CODES"]
+def main(argv: Optional[list] = None) -> int:
+    """The operator's CLI: `k402-spend --ledger PATH [--policy PATH] status | freeze | unfreeze | history [--limit N]`
+    (also `python -m k402.spendctl …`). The agent never gets a tool for any of this; the kill switch and the
+    policy are the operator's alone."""
+    import argparse
+    import sys
+    ap = argparse.ArgumentParser(prog="k402-spend", description="Operator controls for a kUSD-market agent's spending.")
+    ap.add_argument("--ledger", required=True, help="the agent's SpendLedger (sqlite file)")
+    ap.add_argument("--policy", help="the agent's SpendPolicy (JSON file); status reports what it has left")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("status", help="frozen, lifetime total, window sums, remaining per bound")
+    sub.add_parser("freeze", help="refuse every payment until unfreeze")
+    sub.add_parser("unfreeze", help="lift a freeze")
+    h = sub.add_parser("history", help="recent spends, newest first")
+    h.add_argument("--limit", type=int, default=20)
+    a = ap.parse_args(argv)
+    try:
+        policy = SpendPolicy.load(a.policy) if a.policy else SpendPolicy()
+    except (OSError, ValueError) as e:
+        print(f"cannot read the policy {a.policy}: {e}", file=sys.stderr)
+        return 2
+    led = SpendLedger(a.ledger)
+    try:
+        if a.cmd == "freeze":
+            led.freeze()
+        elif a.cmd == "unfreeze":
+            led.unfreeze()
+        if a.cmd in ("status", "freeze", "unfreeze"):
+            print(json.dumps(led.status(policy), indent=1))
+        elif a.cmd == "history":
+            print(json.dumps(led.history(a.limit), indent=1))
+    finally:
+        led.close()
+    return 0
+
+
+__all__ = ["SpendPolicy", "SpendLedger", "SpendRefused", "REFUSAL_CODES", "main"]

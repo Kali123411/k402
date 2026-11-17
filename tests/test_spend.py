@@ -56,6 +56,11 @@ def test_policy_load_reads_json_file(tmp_path):
     (tmp_path / "bad.json").write_text("[1, 2]")
     with pytest.raises(ValueError, match="object"):
         SpendPolicy.load(str(tmp_path / "bad.json"))
+    # ~ is expanded, as KusdWallet does for its key file
+    import os
+    os.environ["HOME"] = str(tmp_path)
+    assert SpendPolicy.load("~/policy.json").max_per_call_cents == 5
+    assert SpendLedger("~/led.db").path.endswith(str(tmp_path / "led.db")) and (tmp_path / "led.db").exists()
 
 
 def test_spend_refused_is_a_kusd_error_with_a_code():
@@ -174,3 +179,50 @@ def test_ledger_concurrent_reserves_never_overspend():
     ts = [threading.Thread(target=go) for _ in range(8)]
     [t.start() for t in ts]; [t.join() for t in ts]
     assert len(ok) == 5 and led.status(pol, now=T0)["total_cents"] == 50
+
+
+# ------------------------------------------------------------------ the operator's CLI, exports, version
+def test_cli_status_freeze_unfreeze_history(tmp_path, capsys):
+    from k402.spend import main
+    led_path, pol_path = str(tmp_path / "spend.db"), str(tmp_path / "policy.json")
+    (tmp_path / "policy.json").write_text(json.dumps({"max_total_cents": 100}))
+    led = SpendLedger(led_path)
+    led.settle(led.reserve(SpendPolicy(), kind="pay", cents=7, provider=PAYEE, now=T0), txid="d3" * 32, http=200)
+    led.close()
+    assert main(["--ledger", led_path, "--policy", pol_path, "status"]) == 0
+    st = json.loads(capsys.readouterr().out)
+    assert st["frozen"] is False and st["total_cents"] == 7 and st["remaining"]["total_cents"] == 93
+    assert main(["--ledger", led_path, "freeze"]) == 0
+    assert json.loads(capsys.readouterr().out)["frozen"] is True, "freeze prints the new status"
+    assert main(["--ledger", led_path, "--policy", pol_path, "status"]) == 0
+    assert json.loads(capsys.readouterr().out)["frozen"] is True
+    assert SpendLedger(led_path).frozen is True, "a frozen ledger refuses the payer in another process"
+    # the module entry point runs without Python's "found in sys.modules" RuntimeWarning (k402/__init__ imports spend)
+    import subprocess
+    import sys
+    r = subprocess.run([sys.executable, "-W", "error", "-m", "k402.spendctl", "--ledger", led_path, "status"], capture_output=True, text=True)
+    assert r.returncode == 0 and json.loads(r.stdout)["frozen"] is True, r.stderr
+    assert main(["--ledger", led_path, "unfreeze"]) == 0
+    capsys.readouterr()
+    assert main(["--ledger", led_path, "history", "--limit", "1"]) == 0
+    rows = json.loads(capsys.readouterr().out)
+    assert len(rows) == 1 and rows[0]["cents"] == 7 and rows[0]["txid"] == "d3" * 32 and rows[0]["provider"] == PAYEE
+
+
+def test_cli_status_without_policy_still_works(tmp_path, capsys):
+    from k402.spend import main
+    assert main(["--ledger", str(tmp_path / "s.db"), "status"]) == 0
+    st = json.loads(capsys.readouterr().out)
+    assert st["total_cents"] == 0 and st["policy"] == SpendPolicy().to_dict()
+    assert main(["--ledger", str(tmp_path / "s.db"), "--policy", str(tmp_path / "missing.json"), "status"]) == 2
+    assert "missing.json" in capsys.readouterr().err
+
+
+def test_package_exports_and_version():
+    import pathlib
+    import re
+    import k402
+    assert k402.SpendPolicy is SpendPolicy and k402.SpendLedger is SpendLedger and k402.SpendRefused is SpendRefused
+    assert {"SpendPolicy", "SpendLedger", "SpendRefused"} <= set(k402.__all__)
+    pyproject = pathlib.Path(k402.__file__).resolve().parents[1] / "pyproject.toml"
+    assert k402.__version__ == "0.10.0" == re.search(r'^version = "([^"]+)"', pyproject.read_text(), re.M).group(1)
