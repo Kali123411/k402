@@ -300,3 +300,26 @@ def test_registry_without_cors_sends_no_cors_headers():
     c = _app(FakeBackend(), FakeWallet())
     r = c.get("/registry/search", headers={"Origin": "http://localhost:3000"})
     assert "access-control-allow-origin" not in r.headers
+
+
+def test_reputation_is_derived_from_the_verified_settlement_rows():
+    # the live registry drifted: a counter said 55¢ over 11 reports while the verified rows summed 50¢ over 10
+    # (one credit from before the dedup table existed). The rows are the truth: reputation reads them.
+    be, w = FakeBackend(), FakeWallet()
+    db = tempfile.mktemp(suffix=".db")
+    c = _app(be, w, db=db)
+    c.post("/registry/list", json=kusd_listing(A_PRIV, A_PUB, 5).to_dict())
+    w.boxes[("d3" * 32, derive_payee(A_PUB, "p_1"), 5)] = (624_000_100, 0)
+    w.boxes[("d4" * 32, derive_payee(A_PUB, "p_2"), 5)] = (624_000_200, 0)
+    assert report(c, A_PUB, "d3" * 32, 5, "p_1").json()["ok"] and report(c, A_PUB, "d4" * 32, 5, "p_2").json()["ok"]
+    # a phantom credit, as the old counter path could leave behind
+    with sqlite3.connect(db) as raw:
+        raw.execute("UPDATE reputation SET settled_cents=settled_cents+5, close_count=close_count+1 WHERE payee_pubkey=?", (A_PUB,))
+    prov = c.get("/registry/provider/" + A_PUB).json()
+    assert prov["reputation"]["settled_cents"] == 10, "the verified rows, not the counter"
+    assert prov["reputation"]["kusd_payments"] == 2
+    assert prov["reputation"]["closes"] == 0, "closes counts KAS channel closes only"
+    assert prov["reputation"]["first_settled"] <= prov["reputation"]["last_settled"]
+    # the feed and the listing now agree
+    assert c.get("/registry/activity").json()["total_cents"] == 10
+    assert c.get("/registry/search", params={"currency": "kUSD"}).json()["providers"][0]["reputation"]["settled_cents"] == 10

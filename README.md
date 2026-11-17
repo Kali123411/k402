@@ -63,7 +63,7 @@ k402.install(app)                              # + mounts /channel/open, /config
 
 An open marketplace of agent-payable services, settled trustlessly over channels —
 the registry never touches money. Publish a signed listing and agents find you;
-reputation is **chain-verified settled volume**. Browse it at
+reputation is **chain-verified settled volume**, derived from the verified rows themselves (`settled_kas` from channel closes, `settled_cents` and `kusd_payments` from kUSD boxes), never from a counter. Browse it at
 [`/exchange`](https://x402-compute.68cxgfyr0.workers.dev/exchange).
 
 ```python
