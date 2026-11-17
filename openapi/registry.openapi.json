@@ -1,0 +1,383 @@
+{
+ "openapi": "3.1.0",
+ "info": {
+  "title": "k402 service registry",
+  "description": "Discovery for the Kaspa Agent Market: signed listings, reputation derived from chain-verified settlements, and the settlements feed. The registry never touches money.",
+  "version": "0.11.0"
+ },
+ "paths": {
+  "/registry/list": {
+   "post": {
+    "summary": "Register",
+    "operationId": "register_registry_list_post",
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     }
+    }
+   },
+   "delete": {
+    "summary": "Delist",
+    "description": "Signed delist: body is a listing (same payee_pubkey+capability) with a valid signature.",
+    "operationId": "delist_registry_list_delete",
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     }
+    }
+   }
+  },
+  "/registry/search": {
+   "get": {
+    "summary": "Search",
+    "operationId": "search_registry_search_get",
+    "parameters": [
+     {
+      "name": "capability",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string",
+       "default": "",
+       "title": "Capability"
+      }
+     },
+     {
+      "name": "max_price_usd",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "number",
+       "default": 0,
+       "title": "Max Price Usd"
+      }
+     },
+     {
+      "name": "min_reputation_kas",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "number",
+       "default": 0,
+       "title": "Min Reputation Kas"
+      }
+     },
+     {
+      "name": "network_filter",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string",
+       "default": "",
+       "title": "Network Filter"
+      }
+     },
+     {
+      "name": "limit",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "integer",
+       "default": 20,
+       "title": "Limit"
+      }
+     },
+     {
+      "name": "currency",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string",
+       "default": "",
+       "title": "Currency"
+      }
+     },
+     {
+      "name": "min_settled_cents",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "integer",
+       "default": 0,
+       "title": "Min Settled Cents"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/registry/provider/{payee_pubkey}": {
+   "get": {
+    "summary": "Provider",
+    "operationId": "provider_registry_provider__payee_pubkey__get",
+    "parameters": [
+     {
+      "name": "payee_pubkey",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "Payee Pubkey"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/registry/activity": {
+   "get": {
+    "summary": "Activity",
+    "description": "Verified kUSD settlements, newest first \u2014 the market page's live feed. `capability` is what the\nprovider reported it was paid for (checked against its listings at report time); reports from before\nthat field fall back to the payee's oldest kUSD listing, empty once delisted. The amounts are\nchain-verified before they land here (see /registry/settled): what agents actually paid.",
+    "operationId": "activity_registry_activity_get",
+    "parameters": [
+     {
+      "name": "limit",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "integer",
+       "default": 50,
+       "title": "Limit"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/registry/settled/{txid}": {
+   "get": {
+    "summary": "Settled Lookup",
+    "description": "The verified kUSD settlement(s) a transaction carries, as the registry recorded them (one per box:\npayee, cents, time, capability) \u2014 the machine-readable answer to \"did this payment count?\". 404 when the\nregistry has no verified row for it (not reported yet, or never a kUSD payment of this family).",
+    "operationId": "settled_lookup_registry_settled__txid__get",
+    "parameters": [
+     {
+      "name": "txid",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "Txid"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/registry/settled": {
+   "post": {
+    "summary": "Settled",
+    "description": "Report a channel close; the registry VERIFIES on-chain that it paid the payee, then\ncredits settled volume. Providers can't inflate (we check the tx); omitting closes only\nhurts their own reputation.",
+    "operationId": "settled_registry_settled_post",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "additionalProperties": true,
+        "type": "object",
+        "title": "Req"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/healthz": {
+   "get": {
+    "summary": "Healthz",
+    "operationId": "healthz_healthz_get",
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     }
+    }
+   }
+  },
+  "/": {
+   "get": {
+    "summary": "Ui",
+    "operationId": "ui__get",
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "text/html": {
+        "schema": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ "components": {
+  "schemas": {
+   "HTTPValidationError": {
+    "properties": {
+     "detail": {
+      "items": {
+       "$ref": "#/components/schemas/ValidationError"
+      },
+      "type": "array",
+      "title": "Detail"
+     }
+    },
+    "type": "object",
+    "title": "HTTPValidationError"
+   },
+   "ValidationError": {
+    "properties": {
+     "loc": {
+      "items": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "integer"
+        }
+       ]
+      },
+      "type": "array",
+      "title": "Location"
+     },
+     "msg": {
+      "type": "string",
+      "title": "Message"
+     },
+     "type": {
+      "type": "string",
+      "title": "Error Type"
+     },
+     "input": {
+      "title": "Input"
+     },
+     "ctx": {
+      "type": "object",
+      "title": "Context"
+     }
+    },
+    "type": "object",
+    "required": [
+     "loc",
+     "msg",
+     "type"
+    ],
+    "title": "ValidationError"
+   }
+  }
+ }
+}

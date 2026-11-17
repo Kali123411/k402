@@ -323,3 +323,16 @@ def test_reputation_is_derived_from_the_verified_settlement_rows():
     # the feed and the listing now agree
     assert c.get("/registry/activity").json()["total_cents"] == 10
     assert c.get("/registry/search", params={"currency": "kUSD"}).json()["providers"][0]["reputation"]["settled_cents"] == 10
+
+
+def test_settled_lookup_by_txid():
+    be, w = FakeBackend(), FakeWallet()
+    c = _app(be, w)
+    c.post("/registry/list", json=kusd_listing(A_PRIV, A_PUB, 5).to_dict())
+    w.boxes[("d3" * 32, derive_payee(A_PUB, "p_1"), 5)] = (624_000_100, 0)
+    assert report(c, A_PUB, "d3" * 32, 5, "p_1").json()["ok"]
+    got = c.get("/registry/settled/" + "D3" * 32).json()   # case-insensitive, canonical lowercase out
+    assert got["txid"] == "d3" * 32 and got["verified"] is True
+    assert got["settlements"] == [{"idx": 0, "payee_pubkey": A_PUB, "cents": 5, "t": got["settlements"][0]["t"], "capability": "summarize"}]
+    assert c.get("/registry/settled/" + "ee" * 32).status_code == 404
+    assert c.get("/registry/settled/not-a-txid").status_code == 400

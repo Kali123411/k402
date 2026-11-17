@@ -297,6 +297,25 @@ def create_registry_app(backend, network: str = "mainnet", db_path: str = "regis
         return {"settlements": [{"t": r[0], "txid": r[1], "idx": r[2], "payee_pubkey": r[3], "cents": r[4], "capability": r[5]} for r in rows],
                 "total_cents": int(total)}
 
+    @app.get("/registry/settled/{txid}")
+    def settled_lookup(txid: str):
+        """The verified kUSD settlement(s) a transaction carries, as the registry recorded them (one per box:
+        payee, cents, time, capability) — the machine-readable answer to "did this payment count?". 404 when the
+        registry has no verified row for it (not reported yet, or never a kUSD payment of this family)."""
+        t = txid.lower()
+        if len(t) != 64 or any(ch not in "0123456789abcdef" for ch in t):
+            return JSONResponse({"error": "txid must be 64 hex characters"}, status_code=400)
+        with db() as c:
+            rows = c.execute("""SELECT s.idx, s.payee_pubkey, s.cents, s.t,
+                                  CASE WHEN s.capability != '' THEN s.capability ELSE
+                                    COALESCE((SELECT capability FROM listings l WHERE l.payee_pubkey=s.payee_pubkey AND l.currency='kUSD'
+                                              ORDER BY l.listed_at LIMIT 1), '') END
+                                FROM settled_kusd s WHERE s.txid=? ORDER BY s.idx""", (t,)).fetchall()
+        if not rows:
+            return JSONResponse({"error": "no verified settlement for this txid", "txid": t}, status_code=404)
+        return {"txid": t, "verified": True,
+                "settlements": [{"idx": r[0], "payee_pubkey": r[1], "cents": r[2], "t": r[3], "capability": r[4]} for r in rows]}
+
     # ---------------------------------------------------------------- reputation (verified closes)
     @app.post("/registry/settled")
     async def settled(req: dict):
