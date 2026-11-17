@@ -118,6 +118,7 @@ async def test_payer_pays_x402_kusd_offer():
     res = await payer(w, {"p.test": p}).pay(P_DICT, "/sum", {"text": "hi"})
     assert res.response.status_code == 200 and res.wire == "x402" and res.cents == 5
     assert w.sent == [(PAY_TO, 5)] and p.paid == [(res.txid, "x402")]
+    assert (res.payment_id, res.pay_to) == (PID, PAY_TO), "the paid offer's id and key travel with the result: verification derives the box from them"
 
 
 @pytest.mark.asyncio

@@ -71,6 +71,8 @@ class PayResult:
     outlay: Outlay
     topped_up: Optional[dict] = None  # the PSM buy made first, when the wallet was short
     attempts: int = 1                 # paid requests sent (retries while the payment was unindexed)
+    payment_id: str = ""              # the offer actually paid: every pay() fetches a fresh 402, so this is NOT a
+    pay_to: str = ""                  # previous quote's id; verification derives the box's key from THESE
 
 
 class PaymentSent(KusdError):
@@ -350,7 +352,7 @@ class KusdPayer:
         if r.status_code >= 400:
             raise PaymentSent(txid, q.cents, provider, r, attempts)
         return PayResult(response=r, txid=txid, cents=q.cents, wire=q.wire, outlay=self.outlay(q.cents),
-                         topped_up=topped, attempts=attempts)
+                         topped_up=topped, attempts=attempts, payment_id=q.payment_id, pay_to=q.pay_to)
 
     # -------- preflight: is this a live kUSD pay-gate? --------
     async def preflight(self, provider: dict) -> bool:
