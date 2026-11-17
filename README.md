@@ -166,6 +166,14 @@ The provider verifies each payment against its own node (the exact holder box, t
 id); the registry lists kUSD prices (`currency="kUSD"`, `price_cents`) and ranks them by settled
 cents; `KusdPayer` is the agent side. Design: `DESIGN-kusd-market.md`.
 
+The trust layer has its own docs: [settlement-verified reputation](docs/reputation.md) (every figure is a
+node-checked payment row) and [operator spending controls](docs/spend-policy.md) (how a human bounds an
+autonomous buyer). The seed services of the Kaspa Agent Market — `summarize`, `embed`, `translate`,
+`review`, `extract`, each a real model call for a few cents — are one provider process
+(`examples/kusd_provider.py`) over the catalogue in `examples/kusd_capabilities.py`; a listing's `meta`
+carries the call's `input`, `output` and a complete `example` body, so an agent can use a service it has
+never seen. `examples/kusd_list.py --capability embed --cents 2` lists one (the meta comes from the catalogue).
+
 ### Operator spending controls
 
 An agent pays with a key it holds, so the person funding that key sets the bounds, and the agent
