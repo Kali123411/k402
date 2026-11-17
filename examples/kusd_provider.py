@@ -24,6 +24,7 @@ PRICE_SOMPI = int(os.environ.get("PRICE_SOMPI", "3000000"))
 REGISTRY = os.environ.get("K402_REGISTRY", "http://127.0.0.1:8791").rstrip("/")
 OLLAMA = os.environ.get("OLLAMA_URL", "http://192.168.4.38:11434").rstrip("/")
 MODEL = os.environ.get("SUMMARIZE_MODEL", "llama3.1:8b-instruct-q4_K_M")
+CAPABILITY = os.environ.get("CAPABILITY", "summarize")   # named in settled reports so the market feed says what was paid for
 
 w = wallet()
 k402 = k402_for(w, backend(), kusd_price_cents=PRICE_CENTS, kas_price_sompi=PRICE_SOMPI)
@@ -40,7 +41,7 @@ async def report(payment: PaymentRecord) -> None:
     try:   # the registry recomputes the offer's payee key from the listed key and the payment_id
         await http.post(f"{REGISTRY}/registry/settled",
                         json={"payee_pubkey": w.payee_xonly(), "txid": payment.meta["txid"], "cents": payment.amount_sompi,
-                              "payment_id": payment.payment_id})
+                              "payment_id": payment.payment_id, "capability": CAPABILITY})
     except httpx.HTTPError:
         pass
 

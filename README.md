@@ -211,7 +211,8 @@ A web page can be the agent. `allow_cors(app, origins)` (also `create_registry_a
 CORS for exactly the origins you name, with the x402 headers allowed in (`PAYMENT-SIGNATURE`,
 `X-K402-Payment`) and exposed out (`PAYMENT-REQUIRED`, `PAYMENT-RESPONSE`); without it a browser cannot
 read a quote. `GET /registry/activity?limit=50` lists the registry's chain-verified kUSD settlements,
-newest first, for a live feed. The demo runners read `CORS_ORIGINS` from the environment.
+newest first, for a live feed; a settled report may name the `capability` that was paid for (kept when it is
+one of the payee's listings). The demo runners read `CORS_ORIGINS` from the environment.
 
 ## Chain backends
 

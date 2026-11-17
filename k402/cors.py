@@ -10,12 +10,15 @@ EXPOSE_HEADERS = ["PAYMENT-REQUIRED", "PAYMENT-RESPONSE"]
 
 
 def allow_cors(app, origins: Iterable[str], *, max_age: int = 600) -> None:
-    """Add FastAPI's CORSMiddleware to `app` for exactly `origins` (no wildcard), with the x402 headers allowed
-    and exposed. Call it on a registry app (`create_registry_app(cors_origins=…)` does) and on a provider app."""
+    """Add FastAPI's CORSMiddleware to `app` for exactly `origins` (a wildcard raises ValueError), with the x402
+    headers allowed and exposed. Call it on a registry app (`create_registry_app(cors_origins=…)` does) and on a
+    provider app. No origins → no middleware."""
     from fastapi.middleware.cors import CORSMiddleware
     origins = [o.strip().rstrip("/") for o in origins if o and o.strip()]
     if not origins:
         return
+    if any(o == "*" or o.startswith("*") for o in origins):
+        raise ValueError("a wildcard origin is refused: name the pages that may read quotes and pay from a browser")
     app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["GET", "POST", "OPTIONS"],
                        allow_headers=ALLOW_HEADERS, expose_headers=EXPOSE_HEADERS, max_age=max_age)
 

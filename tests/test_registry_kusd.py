@@ -241,9 +241,20 @@ def test_activity_lists_verified_settlements_newest_first():
     assert len(c.get("/registry/activity", params={"limit": 1}).json()["settlements"]) == 1
     assert c.get("/registry/activity", params={"limit": 999}).json()["settlements"] == got["settlements"], "limit is clamped, never an error"
     assert c.get("/registry/activity", params={"limit": -3}).status_code == 200
-    # a delisted provider's settlements stay in the feed, with no capability to show
-    assert c.request("DELETE", "/registry/list", json=kusd_listing(B_PRIV, B_PUB, 9, capability="extract").to_dict()).status_code == 200
-    assert c.get("/registry/activity").json()["settlements"][0]["capability"] == ""
+    # a provider with several kUSD listings: the report names the capability that was paid (checked against its
+    # listings; an unknown name falls back to its oldest listing), so the feed says what agents paid FOR
+    c.post("/registry/list", json=kusd_listing(B_PRIV, B_PUB, 7, capability="summarize").to_dict())
+    w.boxes[("d5" * 32, derive_payee(B_PUB, "p_3"), 7)] = (624_000_300, 0)
+    w.boxes[("d6" * 32, derive_payee(B_PUB, "p_4"), 7)] = (624_000_400, 0)
+    assert c.post("/registry/settled", json={"payee_pubkey": B_PUB, "txid": "d5" * 32, "cents": 7, "payment_id": "p_3", "capability": "summarize"}).json()["ok"]
+    assert c.post("/registry/settled", json={"payee_pubkey": B_PUB, "txid": "d6" * 32, "cents": 7, "payment_id": "p_4", "capability": "not-listed"}).json()["ok"]
+    caps = {s["txid"][:2]: s["capability"] for s in c.get("/registry/activity").json()["settlements"]}
+    assert caps == {"d6": "extract", "d5": "summarize", "d4": "extract", "d3": "summarize"}
+    # a delisted provider's settlements stay in the feed; what it reported stands, the rest has no capability to show
+    for cap in ("extract", "summarize"):
+        assert c.request("DELETE", "/registry/list", json=kusd_listing(B_PRIV, B_PUB, 9 if cap == "extract" else 7, capability=cap).to_dict()).status_code == 200
+    caps = {s["txid"][:2]: s["capability"] for s in c.get("/registry/activity").json()["settlements"]}
+    assert caps == {"d6": "", "d5": "summarize", "d4": "", "d3": "summarize"}
 
 
 def test_cors_preflight_allows_x402_headers():
@@ -263,22 +274,26 @@ def test_cors_preflight_allows_x402_headers():
     # the same helper on a provider's own app (what the browser agent talks to)
     from fastapi import FastAPI
     from k402 import allow_cors
-    p = FakeProviderApp = FastAPI()
+    p = FastAPI()
     allow_cors(p, ["http://localhost:3000"])
 
     @p.post("/summarize")
     def summarize():
         return {"ok": True}
-    pc = TestClient(FakeProviderApp)
+    pc = TestClient(p)
     r = pc.options("/summarize", headers={"Origin": "http://localhost:3000", "Access-Control-Request-Method": "POST",
                                           "Access-Control-Request-Headers": "payment-signature,x-k402-payment,content-type"})
     assert r.status_code == 200 and "x-k402-payment" in r.headers["access-control-allow-headers"].lower()
     r = pc.post("/summarize", json={}, headers={"Origin": "http://localhost:3000"})
     assert "payment-response" in r.headers["access-control-expose-headers"].lower()
-    # no origins named → the helper is a no-op (no wildcard sneaks in)
+    # no origins named → the helper is a no-op; a wildcard is refused (a provider must name who may pay from a page)
     q = FastAPI()
     allow_cors(q, [])
     assert not q.user_middleware
+    with pytest.raises(ValueError, match="wildcard"):
+        allow_cors(FastAPI(), ["*"])
+    from k402.cors import origins_from_env
+    assert origins_from_env(" https://a.example, http://localhost:3000 ,") == ["https://a.example", "http://localhost:3000"]
 
 
 def test_registry_without_cors_sends_no_cors_headers():
