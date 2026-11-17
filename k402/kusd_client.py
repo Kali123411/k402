@@ -58,6 +58,8 @@ class Quote:
     network: str                    # as the offer named it (k402 name or x402 id)
     wire: str                       # "x402" | "k402"
     accepted: Optional[dict] = None # the x402 requirement we accept (x402 wire only)
+    url: str = ""                   # the resource that quoted (set by quote())
+    outlay: Optional["Outlay"] = None   # what paying it costs in full (set by quote())
 
 
 @dataclass
@@ -272,6 +274,35 @@ class KusdPayer:
             return False
         return "not indexed" in reason or "retry" in reason
 
+    # -------- the quote, checked, without paying --------
+    async def _quote_checked(self, provider: dict, path: str, json_body: Optional[dict], max_price_cents: Optional[int]):
+        """(quote, first response). The quote is None when the endpoint served the call without asking for
+        payment. Every refusal happens here, before anything is built: the operator's freeze and allowlists
+        (before the first request even leaves), then the quote's family, network, price and payee."""
+        base = _base_url(provider["endpoint"])
+        p_path = path or (urlsplit(provider["endpoint"]).path or "/")
+        url = base + (p_path if p_path.startswith("/") else "/" + p_path)
+        self._frozen()
+        self._gate(provider, provider.get("capability"))
+        first = await self.http.post(url, json=json_body or {})
+        if first.status_code < 400:
+            return None, first
+        q = self._quote(first)
+        if self.policy is not None and self.policy.max_per_call_cents is not None and q.cents > self.policy.max_per_call_cents:
+            raise SpendRefused("per_call", f"the provider quotes {q.cents}¢; the operator allows at most {self.policy.max_per_call_cents}¢ a call",
+                               self.ledger.status(self.policy))
+        await self._check(q, self.policy.cap(max_price_cents) if self.policy else max_price_cents, provider)
+        q.url, q.outlay = url, self.outlay(q.cents)
+        return q, first
+
+    async def quote(self, provider: dict, path: str = "", json_body: Optional[dict] = None, *,
+                    max_price_cents: Optional[int] = None) -> Optional[Quote]:
+        """What one call to `provider` would cost, fully checked, with nothing paid: the kUSD requirement read
+        off the 402 (cents, the per-offer payee key, payment_id, wire) and the full outlay. Raises exactly what
+        pay() would raise before building a box (KusdError / SpendRefused). None when the call is free."""
+        q, _ = await self._quote_checked(provider, path, json_body, max_price_cents)
+        return q
+
     # -------- pay one call --------
     async def pay(self, provider: dict, path: str = "", json_body: Optional[dict] = None, *,
                   max_price_cents: Optional[int] = None, ensure: bool = True) -> PayResult:
@@ -279,20 +310,10 @@ class KusdPayer:
         fetch the 402, check the quote, top up if short, build the box, retry with the proof; wait out "not
         indexed yet" on the same txid. Raises KusdError before any box is built when the quote is refused,
         PaymentSent when the box was built but the call was not served."""
-        base = _base_url(provider["endpoint"])
-        p_path = path or (urlsplit(provider["endpoint"]).path or "/")
-        url = base + (p_path if p_path.startswith("/") else "/" + p_path)
-        # the operator's answers that need no quote come first: nothing leaves for a provider they do not allow
-        self._frozen()
-        self._gate(provider, provider.get("capability"))
-        first = await self.http.post(url, json=json_body or {})
-        if first.status_code < 400:
+        q, first = await self._quote_checked(provider, path, json_body, max_price_cents)
+        if q is None:
             return PayResult(response=first, txid="", cents=0, wire="free", outlay=Outlay(0, 0, 0), attempts=0)
-        q = self._quote(first)
-        if self.policy is not None and self.policy.max_per_call_cents is not None and q.cents > self.policy.max_per_call_cents:
-            raise SpendRefused("per_call", f"the provider quotes {q.cents}¢; the operator allows at most {self.policy.max_per_call_cents}¢ a call",
-                               self.ledger.status(self.policy))
-        await self._check(q, self.policy.cap(max_price_cents) if self.policy else max_price_cents, provider)
+        url = q.url
         # reserve the pay BEFORE any top-up: no KAS is swapped for a payment the pay bounds refuse
         rid = self._reserve("pay", q.cents, provider, self.outlay(q.cents).kas_sompi)
         try:

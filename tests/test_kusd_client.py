@@ -9,6 +9,7 @@ from k402 import x402
 from k402.kusd import Family, KusdError
 from k402.kusd_client import HOLDER_VALUE_SOMPI, SEND_FEE_SOMPI, KusdPayer, Outlay, PaymentSent
 from k402.kusd_keys import derive_payee
+from k402.channel import payer_pubkey_from_privkey
 from k402.schemes import KusdOffer, payment_required_body
 
 AUTH = "06" * 32
@@ -484,3 +485,24 @@ async def test_payment_sent_when_the_paid_request_itself_fails():
     with pytest.raises(PaymentSent) as e3:
         await payer(w, {"p.test": Provider(cents=5)}).pay(P_DICT, "/sum", {})
     assert e3.value.status == 0 and len(w.sent) == 1
+
+
+# ------------------------------------------------------------------ Phase 3: a quote without a payment
+@pytest.mark.asyncio
+async def test_payer_quote_checks_everything_and_pays_nothing():
+    w, p = FakeWallet(), Provider(cents=5)
+    kp = payer(w, {"p.test": p})
+    q = await kp.quote(dict(P_DICT, capability="summarize"), "/sum", {"text": "hi"})
+    assert (q.cents, q.pay_to, q.payment_id, q.wire, q.authority) == (5, PAY_TO, PID, "x402", AUTH)
+    assert q.outlay.price_cents == 5 and q.outlay.kas_sompi == HOLDER_VALUE_SOMPI + SEND_FEE_SOMPI
+    assert w.sent == [] and p.paid == [] and p.hits == 1, "one unpaid request, no box, no proof"
+    # the same refusals as pay(), before anything is built
+    with pytest.raises(KusdError, match="payee mismatch"):
+        await payer(w, {"p.test": Provider(cents=5, pay_to=derive_payee(payer_pubkey_from_privkey("cd" * 32), PID))}).quote(P_DICT, "/sum", {})
+    kpp, _ = bounded(w, {"p.test": Provider(cents=50)}, max_per_call_cents=10)
+    with pytest.raises(SpendRefused) as e:
+        await kpp.quote(P_DICT, "/sum", {})
+    assert e.value.code == "per_call" and w.sent == []
+    # a free endpoint quotes nothing to pay
+    free = await payer(w, {"p.test": lambda r: httpx.Response(200, json={"ok": True})}).quote({"endpoint": "https://p.test/x"}, "/x", {})
+    assert free is None

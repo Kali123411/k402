@@ -1,0 +1,145 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "https://raw.githubusercontent.com/Kali123411/k402/main/schema/listing.v1.json",
+ "title": "k402 listing v1",
+ "description": "A provider's signed advertisement of one pay-per-call service on the Kaspa Agent Market. Signed (BIP340) by payee_pubkey over the canonical JSON of every field but sig.",
+ "type": "object",
+ "additionalProperties": false,
+ "required": [
+  "capability",
+  "endpoint",
+  "payee_pubkey",
+  "price_usd",
+  "network",
+  "schemes",
+  "channel_terms",
+  "meta",
+  "listed_at",
+  "sig"
+ ],
+ "properties": {
+  "capability": {
+   "type": "string",
+   "minLength": 1,
+   "description": "what the service does, e.g. summarize, llm:chat"
+  },
+  "endpoint": {
+   "type": "string",
+   "pattern": "^https?://",
+   "description": "the 402-gated resource an agent POSTs to"
+  },
+  "payee_pubkey": {
+   "type": "string",
+   "pattern": "^[0-9a-f]{64}$",
+   "description": "x-only key: receives payment and signs this listing"
+  },
+  "price_usd": {
+   "type": "number",
+   "minimum": 0,
+   "description": "the comparable price per call in USD (for kUSD: price_cents / 100)"
+  },
+  "network": {
+   "type": "string",
+   "description": "mainnet | testnet-10 (kUSD runs on testnet-10 today)"
+  },
+  "schemes": {
+   "type": "array",
+   "minItems": 1,
+   "items": {
+    "type": "string"
+   },
+   "description": "how it is paid: kusd-utxo (kUSD box), kaspa-utxo, kaspa-channel, kaspa-session, \u2026"
+  },
+  "channel_terms": {
+   "type": "object",
+   "description": "min/max_sompi, maxfee_sompi, min_expiry_daa_delta for kaspa-channel"
+  },
+  "stake_outpoint": {
+   "type": [
+    "string",
+    "null"
+   ],
+   "description": "optional txid:index the provider staked"
+  },
+  "meta": {
+   "type": "object",
+   "description": "free-form: model, provider name, wires, region, \u2026"
+  },
+  "description": {
+   "type": "string",
+   "description": "one or two lines for humans and agents"
+  },
+  "currency": {
+   "type": "string",
+   "enum": [
+    "KAS",
+    "kUSD"
+   ],
+   "description": "pricing unit; absent means KAS"
+  },
+  "price_cents": {
+   "type": "integer",
+   "minimum": 0,
+   "description": "kUSD price per call in cents (currency kUSD)"
+  },
+  "listed_at": {
+   "type": "integer",
+   "minimum": 0,
+   "description": "unix seconds, stamped when signed"
+  },
+  "sig": {
+   "type": "string",
+   "pattern": "^[0-9a-f]{128}$",
+   "description": "BIP340 signature by payee_pubkey"
+  }
+ },
+ "allOf": [
+  {
+   "if": {
+    "properties": {
+     "currency": {
+      "const": "kUSD"
+     }
+    },
+    "required": [
+     "currency"
+    ]
+   },
+   "then": {
+    "required": [
+     "price_cents"
+    ],
+    "properties": {
+     "price_cents": {
+      "minimum": 1
+     }
+    }
+   }
+  }
+ ],
+ "examples": [
+  {
+   "capability": "summarize",
+   "endpoint": "https://summarize.kaspa-402.org/summarize",
+   "payee_pubkey": "4e368c507924a26afdc91bead200b8d5c0dd9e33b44f3e144b83bcac3754a5a0",
+   "price_usd": 0.05,
+   "network": "testnet-10",
+   "schemes": [
+    "kusd-utxo"
+   ],
+   "channel_terms": {},
+   "stake_outpoint": null,
+   "meta": {
+    "wires": [
+     "x402",
+     "k402"
+    ]
+   },
+   "description": "Summarize text (llama3.1 8B); 5 cents of kUSD a call",
+   "currency": "kUSD",
+   "price_cents": 5,
+   "listed_at": 1794886585,
+   "sig": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+  }
+ ]
+}

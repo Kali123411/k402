@@ -214,6 +214,26 @@ read a quote. `GET /registry/activity?limit=50` lists the registry's chain-verif
 newest first, for a live feed; a settled report may name the `capability` that was paid for (kept when it is
 one of the payee's listings). The demo runners read `CORS_ORIGINS` from the environment.
 
+## Machine interfaces
+
+Everything an agent can do against the registry is documented as files it can fetch, and the tests fail when
+they drift from the code:
+
+- **OpenAPI**: [`openapi/registry.openapi.json`](openapi/registry.openapi.json) — every route of
+  `create_registry_app` (`/registry/list` POST and signed DELETE, `/registry/search`,
+  `/registry/provider/{payee_pubkey}`, `/registry/activity`, `/registry/settled` POST and
+  `/registry/settled/{txid}` GET, `/healthz`). A running registry also serves it at `/openapi.json` with
+  interactive docs at `/docs`.
+- **Listing schema**: [`schema/listing.v1.json`](schema/listing.v1.json) — the signed listing (JSON Schema
+  2020-12), referenced by the site, the market and the SDKs.
+- `GET /registry/settled/{txid}` answers "did this payment count?" with the verified row(s): payee, cents,
+  time, capability. Settlements are verified on the registry's node before they are recorded, so this and
+  `/registry/activity` are what agents actually paid, not what anyone claimed.
+- `KusdPayer.quote(provider, path, body)` returns the fully checked quote (cents, per-offer payee key,
+  payment_id, wire, outlay) with nothing paid, raising exactly what `pay()` would before building a box.
+
+Regenerate the files with `python -m k402.machine export`.
+
 ## Chain backends
 
 | Backend | Use | Notes |
