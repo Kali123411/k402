@@ -132,13 +132,19 @@ def create_registry_app(backend, network: str = "mainnet", db_path: str = "regis
         allow_cors(app, cors_origins)
 
     def _rep(payee_pubkey: str) -> dict:
+        """Reputation is derived from the verified rows, never from a counter: `settled_closes` (KAS channel
+        closes checked on chain) and `settled_kusd` (kUSD boxes checked on the node). The `reputation` table
+        stays as a legacy mirror of the KAS side; a drift between a counter and the rows (seen live on
+        2026-11-17) can no longer show up anywhere."""
         with db() as c:
-            row = c.execute("SELECT settled_sompi, close_count, first_settled, last_settled, settled_cents "
-                            "FROM reputation WHERE payee_pubkey=?", (payee_pubkey,)).fetchone()
-        if not row:
-            return {"settled_kas": 0.0, "settled_cents": 0, "closes": 0, "first_settled": None, "last_settled": None}
-        return {"settled_kas": round(row[0] / 1e8, 4), "settled_cents": row[4], "closes": row[1],
-                "first_settled": row[2], "last_settled": row[3]}
+            kas = c.execute("SELECT COALESCE(SUM(sompi), 0), COUNT(*), MIN(t), MAX(t) FROM settled_closes WHERE payee_pubkey=?",
+                            (payee_pubkey,)).fetchone()
+            kusd = c.execute("SELECT COALESCE(SUM(cents), 0), COUNT(*), MIN(t), MAX(t) FROM settled_kusd WHERE payee_pubkey=?",
+                             (payee_pubkey,)).fetchone()
+        firsts = [t for t in (kas[2], kusd[2]) if t is not None]
+        lasts = [t for t in (kas[3], kusd[3]) if t is not None]
+        return {"settled_kas": round(kas[0] / 1e8, 4), "settled_cents": int(kusd[0]), "closes": int(kas[1]), "kusd_payments": int(kusd[1]),
+                "first_settled": min(firsts) if firsts else None, "last_settled": max(lasts) if lasts else None}
 
     # ---------------------------------------------------------------- list / delist
     @app.post("/registry/list")
@@ -355,12 +361,7 @@ def create_registry_app(backend, network: str = "mainnet", db_path: str = "regis
             if c.execute("INSERT OR IGNORE INTO settled_kusd (txid, idx, payee_pubkey, cents, t, capability) VALUES (?,?,?,?,?,?)",
                          (txid, int(r.index or 0), payee_pubkey, cents, now, capability if listed else "")).rowcount == 0:
                 return {"ok": True, "already_counted": True}
-            c.execute("""INSERT INTO reputation (payee_pubkey, settled_sompi, settled_cents, close_count, first_settled, last_settled)
-                         VALUES (?,0,?,1,?,?)
-                         ON CONFLICT(payee_pubkey) DO UPDATE SET
-                           settled_cents=settled_cents+excluded.settled_cents,
-                           close_count=close_count+1, last_settled=excluded.last_settled""",
-                      (payee_pubkey, cents, now, now))
+        # the row IS the credit: reputation is derived from settled_kusd (see _rep), no counter to drift
         return {"ok": True, "credited_cents": cents, "reputation": _rep(payee_pubkey)}
 
     @app.get("/healthz")
