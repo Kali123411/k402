@@ -21,6 +21,11 @@ from .kusd import KusdError
 from .kusd_keys import derive_payee
 from .registry import RegistryClient
 from .schemes import PAYMENT_HEADER, SCHEME_KUSD, KusdOffer, parse_offers
+from .spend import SpendLedger, SpendPolicy, SpendRefused
+
+# kusd_pay says this when it stopped before signing anything: the reservation is then void. Any other failure of a
+# send/buy keeps counting against the budget, because the transaction may have been broadcast.
+REFUSED_BEFORE_SIGNING = "refused before signing"
 
 # every kUSD box carries this much KAS (kusd-client HOLDER_VALUE), which the recipient owns too and recovers
 # when it merges or spends the box; the network fee is an upper bound (a `send` costs ~0.07 KAS on TN10)
@@ -84,14 +89,56 @@ def _base_url(endpoint: str) -> str:
 class KusdPayer:
     def __init__(self, wallet, registry_url: Optional[str] = None, network: str = "testnet-10",
                  http: Optional[httpx.AsyncClient] = None, headroom_cents: int = 50,
-                 retry_delays: tuple = (2, 4, 8, 15)):
+                 retry_delays: tuple = (2, 4, 8, 15), *, policy: Optional[SpendPolicy] = None,
+                 ledger: Optional[SpendLedger] = None):
+        """`policy` is the operator's SpendPolicy; it needs a `ledger` (a SpendLedger file) so the budget
+        survives a restart. Without a policy the payer is bounded only by the caps each call passes."""
+        if policy is not None and ledger is None:
+            raise ValueError("a SpendPolicy needs a ledger (SpendLedger): an unpersisted budget resets on every restart")
         self.wallet = wallet
         self.network = network
         self.http = http or httpx.AsyncClient(timeout=180)
         self.headroom_cents = headroom_cents
         self.retry_delays = retry_delays
+        self.policy, self.ledger = policy, ledger
         self._registry = RegistryClient(registry_url, http=self.http) if registry_url else None
         self._family = None
+
+    # -------- the operator's bounds --------
+    def spend_status(self) -> Optional[dict]:
+        """What the operator's policy has left (SpendLedger.status), or None when there is no policy."""
+        return None if self.policy is None else self.ledger.status(self.policy)
+
+    def _gate(self, provider: dict, capability: Optional[str]) -> None:
+        """Refuse before anything is reserved: a capability or payee the operator did not allow, or a bare
+        endpoint whose quote cannot be checked against a listed key."""
+        pol = self.policy
+        if pol is None:
+            return
+        if pol.allow_capabilities is not None and capability not in pol.allow_capabilities:
+            raise SpendRefused("capability", f"{capability or 'a provider naming no capability'} is not in the operator's allowed capabilities",
+                               self.ledger.status(pol))
+        listed = (provider.get("payee_pubkey") or "").lower()
+        if not listed:
+            if pol.require_listed_payee:
+                raise SpendRefused("unlisted_payee", "the provider has no listed payee key to check the quote against", self.ledger.status(pol))
+        elif pol.allow_payees is not None and listed not in pol.allow_payees:
+            raise SpendRefused("payee", f"{listed[:8]}… is not in the operator's allowed payees", self.ledger.status(pol))
+
+    def _reserve(self, kind: str, cents: int, provider: dict, kas_sompi: int) -> Optional[int]:
+        if self.policy is None:
+            return None
+        return self.ledger.reserve(self.policy, kind=kind, cents=cents, provider=(provider.get("payee_pubkey") or provider.get("endpoint") or ""),
+                                   capability=provider.get("capability") or "", kas_sompi=kas_sompi)
+
+    def _failed(self, rid: Optional[int], e: BaseException) -> None:
+        """A send/buy raised: void the reservation only when kusd_pay says it never signed."""
+        if rid is not None and isinstance(e, KusdError) and REFUSED_BEFORE_SIGNING in str(e).lower():
+            self.ledger.void(rid)
+
+    def _settle(self, rid: Optional[int], **kw) -> None:
+        if rid is not None:
+            self.ledger.settle(rid, **kw)
 
     async def family(self):
         if self._family is None:
@@ -106,6 +153,8 @@ class KusdPayer:
         found = await self._registry.search(capability=capability, currency="kUSD", limit=limit)
         if max_price_cents is not None:
             found = [p for p in found if int(p.get("price_cents", 0)) <= max_price_cents]
+        if self.policy is not None and self.policy.allow_payees is not None:
+            found = [p for p in found if (p.get("payee_pubkey") or "").lower() in self.policy.allow_payees]
         return found
 
     @staticmethod
@@ -156,20 +205,34 @@ class KusdPayer:
         if not q.payment_id:
             raise KusdError("the offer names no payment_id")
         listed = provider.get("payee_pubkey")
-        if listed and q.pay_to.lower() != derive_payee(listed, q.payment_id):
-            raise KusdError("payee mismatch: the quote is not paid to the listed provider's key for this offer")
+        if listed:
+            try:
+                expected = derive_payee(listed, q.payment_id)
+            except (ValueError, TypeError):
+                raise KusdError("the listed payee key is not a valid x-only public key") from None
+            if q.pay_to.lower() != expected:
+                raise KusdError("payee mismatch: the quote is not paid to the listed provider's key for this offer")
 
     @staticmethod
     def outlay(cents: int) -> Outlay:
         return Outlay(price_cents=int(cents))
 
-    async def ensure_funds(self, cents: int) -> Optional[dict]:
+    async def ensure_funds(self, cents: int, provider: Optional[dict] = None) -> Optional[dict]:
         """Top the wallet up through the PSM when its kUSD is short: the shortfall plus `headroom_cents`
-        (the agent pays KAS for it, and the PSM's fee). Returns the buy, or None when nothing was needed."""
+        (the agent pays KAS for it, and the PSM's fee). Under a policy the buy is reserved first (kind
+        "topup") and refused when it would cross `max_window_topup_cents`. Returns the buy, or None."""
         have = int((await asyncio.to_thread(self.wallet.balance)).get("kusd_cents", 0))
         if have >= cents:
             return None
-        return await asyncio.to_thread(self.wallet.buy, cents - have + self.headroom_cents)
+        need = cents - have + self.headroom_cents
+        rid = self._reserve("topup", need, provider or {}, 0)
+        try:
+            bought = await asyncio.to_thread(self.wallet.buy, need)
+        except BaseException as e:
+            self._failed(rid, e)
+            raise
+        self._settle(rid, txid=str(bought.get("txid", "")).lower(), kas_sompi=int(bought.get("kas_in", 0)) + int(bought.get("fee", 0)))
+        return bought
 
     def _paid_headers(self, q: Quote, txid: str, payer: str) -> dict:
         if q.wire == "x402":
@@ -210,10 +273,17 @@ class KusdPayer:
         if first.status_code < 400:
             return PayResult(response=first, txid="", cents=0, wire="free", outlay=Outlay(0, 0, 0), attempts=0)
         q = self._quote(first)
-        await self._check(q, max_price_cents, provider)
-        topped = await self.ensure_funds(q.cents) if ensure else None
-        sent = await asyncio.to_thread(self.wallet.send, q.pay_to, q.cents)
+        self._gate(provider, provider.get("capability"))   # the operator's answer does not depend on the quote
+        await self._check(q, self.policy.cap(max_price_cents) if self.policy else max_price_cents, provider)
+        topped = await self.ensure_funds(q.cents, provider) if ensure else None
+        rid = self._reserve("pay", q.cents, provider, self.outlay(q.cents).kas_sompi)
+        try:
+            sent = await asyncio.to_thread(self.wallet.send, q.pay_to, q.cents)
+        except BaseException as e:
+            self._failed(rid, e)
+            raise
         txid = str(sent["txid"]).lower()
+        self._settle(rid, txid=txid)
         headers = self._paid_headers(q, txid, await asyncio.to_thread(self.wallet.payee_xonly))
         attempts = 0
         delays = iter(self.retry_delays)
@@ -226,6 +296,7 @@ class KusdPayer:
             if d is None:
                 break
             await asyncio.sleep(d)
+        self._settle(rid, http=r.status_code)
         if r.status_code >= 400:
             raise PaymentSent(txid, q.cents, provider, r, attempts)
         return PayResult(response=r, txid=txid, cents=q.cents, wire=q.wire, outlay=self.outlay(q.cents),
@@ -247,7 +318,10 @@ class KusdPayer:
         """Discover kUSD providers for `capability`, rank them, pay the first that serves the call, fail over
         on a refused quote or a dead endpoint up to `max_tries` — never after a box was built (PaymentSent
         propagates). The cap is `max_price_cents`, else each provider's listed price. The RouteResult's
-        `result` is the PayResult."""
+        `result` is the PayResult. A SpendRefused (the operator's bounds) propagates at once: the next provider
+        would meet the same budget."""
+        if self.policy is not None and self.policy.allow_capabilities is not None and capability not in self.policy.allow_capabilities:
+            raise SpendRefused("capability", f"{capability} is not in the operator's allowed capabilities", self.ledger.status(self.policy))
         providers = self.rank(await self.discover(capability, max_price_cents=max_price_cents), policy)
         attempts: list = []
         tries = 0
@@ -260,7 +334,7 @@ class KusdPayer:
             cap = max_price_cents if max_price_cents is not None else (int(provider["price_cents"]) if provider.get("price_cents") else None)
             try:
                 res = await self.pay(provider, path, json_body, max_price_cents=cap)
-            except PaymentSent:
+            except (PaymentSent, SpendRefused):
                 raise
             except (KusdError, httpx.HTTPError) as e:
                 attempts.append((payee, f"error: {e}"))
