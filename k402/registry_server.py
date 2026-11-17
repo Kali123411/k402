@@ -31,6 +31,15 @@ def _payee_address(payee_pubkey: str, network: str) -> str:
     return str(PublicKey(payee_pubkey).to_address(addr_net))
 
 
+def _payee_address_or_none(payee_pubkey: str, network: str) -> Optional[str]:
+    """The payee's KAS address for display; None when the `kaspa` SDK extra is not installed (a kUSD-only
+    registry needs no SDK: kUSD is verified through the wallet binary, KAS closes are not accepted there)."""
+    try:
+        return _payee_address(payee_pubkey, network)
+    except ImportError:
+        return None
+
+
 async def _received_from_tx(backend, address: str, txid: str) -> int:
     """Sompi the address holds in a UTXO created by `txid` (how much a close paid the payee).
     Works while the output is unspent — providers report closes promptly, so this is reliable
@@ -264,7 +273,7 @@ def create_registry_app(backend, network: str = "mainnet", db_path: str = "regis
         if not rows:
             return JSONResponse({"error": "unknown provider"}, status_code=404)
         return {"payee_pubkey": payee_pubkey, "reputation": _rep(payee_pubkey),
-                "address": _payee_address(payee_pubkey, network),
+                "address": _payee_address_or_none(payee_pubkey, network),
                 "listings": [{"capability": r["capability"], "endpoint": r["endpoint"],
                               "price_usd": r["price_usd"], "meta": json.loads(r["meta"]),
                               "currency": r.get("currency", "KAS"), "price_cents": r.get("price_cents", 0),
