@@ -24,7 +24,7 @@ when it is lower than the policy's, never when it is higher.
 | `max_window_cents` | kUSD sent per window. |
 | `max_window_calls` | Paid calls per window (also bounds the KAS locked in boxes: 1.5 KAS + fee each). |
 | `max_window_topup_cents` | kUSD bought through the PSM per window; `0` means the agent may never convert KAS. |
-| `max_window_failures` | Paid calls per window that moved money but were not served (`PaymentSent`); beyond it, stop paying anyone. |
+| `max_window_failures` | Paid calls per window that moved money but were not served (`PaymentSent`: an error status, or no HTTP answer at all); once that many have happened in the window, stop paying anyone. `0` means never pay. |
 | `allow_payees` | Listed provider keys the agent may pay (set of x-only hex). Others are filtered out of discovery and refused on a direct `pay`. |
 | `allow_capabilities` | Capabilities the agent may buy. |
 | `require_listed_payee` (default `True`) | Refuse a bare endpoint with no listed key, because then the payee check (`DESIGN-kusd-market.md` §5) cannot run. |
@@ -40,14 +40,21 @@ it is unfrozen. A freeze is a row in the ledger, not a process restart.
   capability, cents, KAS out, txid, HTTP status, and a `state` of `reserved` / `sent` / `void`. Window
   and total sums are computed from it, so a restart cannot reset a budget.
 - **Reserve before money moves.** `ledger.reserve(policy, kind, cents, …)` runs the checks and the
-  insert in one `BEGIN IMMEDIATE` transaction, so two concurrent pays cannot both pass the same
-  remaining budget. After `wallet.send` the row is settled with the txid; if the send raised with
-  kusd_pay's `refused before signing`, the row is voided; any other send failure keeps the row counted
-  (the money may have moved; the operator would rather under-spend than over-spend).
-- **Order inside `KusdPayer.pay`:** quote → existing checks (family, network, payee, cap where cap is
-  `min(agent's, policy's)`) → policy checks (frozen, failures, capability, payee, listed payee) → top-up
-  reserve + buy → pay reserve → send → settle. Nothing is reserved for a quote that was going to be
-  refused anyway.
+  insert in one `BEGIN IMMEDIATE` transaction, so two concurrent pays (threads or processes on the same
+  file) cannot both pass the same remaining budget. After `wallet.send` the row is settled with the
+  txid; the row is voided only when nothing can have been signed: the Python side never ran the binary
+  (`KusdNotRun`: key file missing or not mode 600, binary not runnable) or kusd_pay said
+  `refused before signing`. Any other send failure keeps the row counted (the money may have moved; the
+  operator would rather under-spend than over-spend).
+- **Order inside `KusdPayer.pay`:** frozen? → capability / payee / listed-payee gate (before the first
+  request leaves, so nothing is sent to an endpoint the operator did not allow) → quote → per-call
+  ceiling (`SpendRefused per_call`) → existing checks (family, network, payee, agent's cap) → **pay
+  reserve** → top-up reserve + buy (only now, so no KAS is ever swapped for a payment the pay bounds
+  refuse; a refused or failed top-up voids the pay row) → send → settle txid → paid request → settle
+  HTTP status. Once the box exists, any failure, including a transport error with no answer (recorded
+  as HTTP `0`), is a `PaymentSent` that counts as a failure, and `pay_best` never fails over past it.
+- The top-up buys the shortfall plus 50¢ headroom; when the window's remaining top-up allowance is less
+  than that but still covers the shortfall, it buys the remainder instead of refusing.
 - **No fail-over on a refusal.** `pay_best` filters discovery by `allow_payees`, and a `SpendRefused`
   propagates immediately: the next provider would hit the same budget.
 - **Status** is read-only and free: `KusdPayer.spend_status()` reports frozen, lifetime total, window
@@ -60,7 +67,8 @@ it is unfrozen. A freeze is a row in the ledger, not a process restart.
 - CLI for the operator: `k402-spend --ledger PATH [--policy PATH] status | freeze | unfreeze | history [--limit N]`
   (`python -m k402.spendctl …` without the console script).
   The agent never gets a tool that writes the policy or the freeze flag; that is the boundary.
-- `k402-mcp`: `pay_kusd` honours `KUSD_SPEND_POLICY` (path to the JSON file) and `KUSD_SPEND_LEDGER`
+- `k402-mcp`: `pay_kusd` honours `KUSD_SPEND_POLICY` (path to the JSON file; re-read whenever its
+  mtime changes, so an operator's edit applies to the next call without a restart) and `KUSD_SPEND_LEDGER`
   (sqlite path, default `~/.kusd-market/spend.db`). Without a policy file the server applies a
   built-in default *(call)*: 25¢ per call, 200¢ and 20 calls per hour, 100¢ of PSM top-up per hour,
   2 unserved payments per hour. A new tool `kusd_spend_status` shows the allowance. Refusals come back
@@ -73,6 +81,9 @@ it is unfrozen. A freeze is a row in the ledger, not a process restart.
   key. The policy bounds what the k402 tools will do, not what arbitrary code with the key could do.
   That is the kUSD covenant's job later (an allowance box), not this change's.
 - Per-provider budgets, time-of-day rules, approvals-in-the-loop. Easy to add on the same ledger.
+- `allow_capabilities` on a direct `pay(provider_dict)` trusts the dict's own `capability`; it binds
+  through `pay_best`, where the registry filters on the capability exactly. The payee allowlist and the
+  quote-to-listed-key check are what bind the money either way.
 
 ## Calls made here
 

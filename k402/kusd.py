@@ -23,6 +23,11 @@ class KusdError(RuntimeError):
     """kusd_pay refused, failed, or could not be run."""
 
 
+class KusdNotRun(KusdError):
+    """The binary was never invoked (key file missing / not mode 600 / symlink / not ours, or the binary itself
+    cannot run): nothing can have been signed, so a payer may release what it reserved for the call."""
+
+
 @dataclass(frozen=True)
 class Family:
     authority: str      # the kUSD authority covenant id: kUSD's on-chain identity (x402 `asset`)
@@ -65,19 +70,19 @@ class KusdWallet:
     # -------- the subprocess --------
     def _check_key_file(self) -> str:
         if not self.key_file:
-            raise KusdError("this operation needs the wallet key (key_file)")
+            raise KusdNotRun("this operation needs the wallet key (key_file)")
         try:
             st = os.lstat(self.key_file)
         except FileNotFoundError:
-            raise KusdError(f"key file {self.key_file} not found") from None
+            raise KusdNotRun(f"key file {self.key_file} not found") from None
         if stat.S_ISLNK(st.st_mode):
-            raise KusdError(f"{self.key_file} is a symlink; the key must be a regular file")
+            raise KusdNotRun(f"{self.key_file} is a symlink; the key must be a regular file")
         if not stat.S_ISREG(st.st_mode):
-            raise KusdError(f"{self.key_file} is not a regular file")
+            raise KusdNotRun(f"{self.key_file} is not a regular file")
         if st.st_uid != os.getuid():
-            raise KusdError(f"{self.key_file} is not owned by this user")
+            raise KusdNotRun(f"{self.key_file} is not owned by this user")
         if stat.S_IMODE(st.st_mode) & 0o077:
-            raise KusdError(f"{self.key_file} must be mode 600 (only its owner may read the key)")
+            raise KusdNotRun(f"{self.key_file} must be mode 600 (only its owner may read the key)")
         return self.key_file
 
     def _env(self, needs_key: bool) -> dict:
@@ -116,7 +121,7 @@ class KusdWallet:
                 return body
             raise KusdError(f"kusd_pay {args[0]} timed out after {timeout or self.timeout}s") from None
         except OSError as e:
-            raise KusdError(f"kusd_pay could not run: {e}") from e
+            raise KusdNotRun(f"kusd_pay could not run: {e}") from e
         body = self._parse(out.stdout)
         if out.returncode != 0 or (body is not None and "error" in body):
             raise KusdError((body or {}).get("error") or out.stderr.strip()[:300] or f"kusd_pay exited {out.returncode}")

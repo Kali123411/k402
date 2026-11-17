@@ -4,7 +4,8 @@
 #
 #   python examples/kusd_agent.py --registry http://127.0.0.1:8791 --capability summarize --text "…" [--max-cents 10]
 #   (env as kusd_common: the agent's KUSD_KEY_FILE etc.; plus the operator's spending controls:
-#    KUSD_SPEND_POLICY = JSON file (SpendPolicy), KUSD_SPEND_LEDGER = sqlite path (default ~/.kusd-market/agent-spend.db).
+#    KUSD_SPEND_POLICY = JSON file (SpendPolicy), KUSD_SPEND_LEDGER = sqlite path (default ~/.kusd-market/spend.db,
+#    the same default as k402-mcp, so one key has one budget).
 #    Without KUSD_SPEND_POLICY the agent is bounded only by --max-cents.)
 import argparse
 import asyncio
@@ -24,7 +25,7 @@ def spend_controls() -> dict:
     if not policy_path:
         return {}
     return {"policy": SpendPolicy.load(os.path.expanduser(policy_path)),
-            "ledger": SpendLedger(os.path.expanduser(os.environ.get("KUSD_SPEND_LEDGER", "~/.kusd-market/agent-spend.db")))}
+            "ledger": SpendLedger(os.environ.get("KUSD_SPEND_LEDGER", "~/.kusd-market/spend.db"))}
 
 
 async def main() -> int:

@@ -163,7 +163,9 @@ class SpendLedger:
                 "cents": int(q("SELECT SUM(cents) FROM spend WHERE kind='pay' AND state!='void' AND ts>?", since)),
                 "calls": int(q("SELECT COUNT(*) FROM spend WHERE kind='pay' AND state!='void' AND ts>?", since)),
                 "topup_cents": int(q("SELECT SUM(cents) FROM spend WHERE kind='topup' AND state!='void' AND ts>?", since)),
-                "failures": int(q("SELECT COUNT(*) FROM spend WHERE kind='pay' AND state='sent' AND http>=400 AND ts>?", since)),
+                # a paid call that was not served: an error status, or 0 = no HTTP answer at all after the box was built
+                "failures": int(q("SELECT COUNT(*) FROM spend WHERE kind='pay' AND state='sent' AND http IS NOT NULL "
+                                  "AND (http<200 OR http>=400) AND ts>?", since)),
             },
         }
 
@@ -273,14 +275,21 @@ def main(argv: Optional[list] = None) -> int:
     except (OSError, ValueError) as e:
         print(f"cannot read the policy {a.policy}: {e}", file=sys.stderr)
         return 2
-    led = SpendLedger(a.ledger)
+    try:
+        led = SpendLedger(a.ledger)
+    except (OSError, sqlite3.Error) as e:
+        print(f"cannot open the ledger {a.ledger}: {e}", file=sys.stderr)
+        return 2
     try:
         if a.cmd == "freeze":
             led.freeze()
         elif a.cmd == "unfreeze":
             led.unfreeze()
         if a.cmd in ("status", "freeze", "unfreeze"):
-            print(json.dumps(led.status(policy), indent=1))
+            st = led.status(policy)
+            if not a.policy:   # without the policy, "remaining"/"policy" would read as "no bounds": print the sums only
+                del st["remaining"], st["policy"]
+            print(json.dumps(st, indent=1))
         elif a.cmd == "history":
             print(json.dumps(led.history(a.limit), indent=1))
     finally:

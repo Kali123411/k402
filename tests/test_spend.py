@@ -48,7 +48,7 @@ def test_policy_cap_is_the_tighter_of_agent_and_policy():
     assert free.cap(7) == 7 and free.cap(None) is None
 
 
-def test_policy_load_reads_json_file(tmp_path):
+def test_policy_load_reads_json_file(tmp_path, monkeypatch):
     f = tmp_path / "policy.json"
     f.write_text(json.dumps({"max_per_call_cents": 5, "allow_capabilities": ["summarize", "extract"]}))
     p = SpendPolicy.load(str(f))
@@ -57,8 +57,7 @@ def test_policy_load_reads_json_file(tmp_path):
     with pytest.raises(ValueError, match="object"):
         SpendPolicy.load(str(tmp_path / "bad.json"))
     # ~ is expanded, as KusdWallet does for its key file
-    import os
-    os.environ["HOME"] = str(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
     assert SpendPolicy.load("~/policy.json").max_per_call_cents == 5
     assert SpendLedger("~/led.db").path.endswith(str(tmp_path / "led.db")) and (tmp_path / "led.db").exists()
 
@@ -213,7 +212,9 @@ def test_cli_status_without_policy_still_works(tmp_path, capsys):
     from k402.spend import main
     assert main(["--ledger", str(tmp_path / "s.db"), "status"]) == 0
     st = json.loads(capsys.readouterr().out)
-    assert st["total_cents"] == 0 and st["policy"] == SpendPolicy().to_dict()
+    assert st["total_cents"] == 0 and "policy" not in st and "remaining" not in st, "no policy given: do not print one that looks unbounded"
+    assert main(["--ledger", str(tmp_path / "no-such-dir" / "s.db"), "status"]) == 2
+    assert "no-such-dir" in capsys.readouterr().err
     assert main(["--ledger", str(tmp_path / "s.db"), "--policy", str(tmp_path / "missing.json"), "status"]) == 2
     assert "missing.json" in capsys.readouterr().err
 
@@ -226,3 +227,22 @@ def test_package_exports_and_version():
     assert {"SpendPolicy", "SpendLedger", "SpendRefused"} <= set(k402.__all__)
     pyproject = pathlib.Path(k402.__file__).resolve().parents[1] / "pyproject.toml"
     assert k402.__version__ == "0.10.0" == re.search(r'^version = "([^"]+)"', pyproject.read_text(), re.M).group(1)
+
+
+def test_ledger_concurrent_reserves_never_overspend_across_connections(tmp_path):
+    # the agent and the operator's CLI (or two agent processes) open the same file: BEGIN IMMEDIATE, not the
+    # in-process lock, is what keeps them from both passing the same remaining budget
+    import threading
+    path, pol = str(tmp_path / "shared.db"), SpendPolicy(max_total_cents=50)
+    handles = [SpendLedger(path) for _ in range(8)]
+    ok, barrier = [], threading.Barrier(8)
+    def go(led):
+        barrier.wait()
+        try:
+            ok.append(led.reserve(pol, kind="pay", cents=10, now=T0))
+        except SpendRefused:
+            pass
+    ts = [threading.Thread(target=go, args=(h,)) for h in handles]
+    [t.start() for t in ts]; [t.join() for t in ts]
+    assert len(ok) == 5 and SpendLedger(path).status(pol, now=T0)["total_cents"] == 50
+    [h.close() for h in handles]
