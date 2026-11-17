@@ -166,6 +166,45 @@ The provider verifies each payment against its own node (the exact holder box, t
 id); the registry lists kUSD prices (`currency="kUSD"`, `price_cents`) and ranks them by settled
 cents; `KusdPayer` is the agent side. Design: `DESIGN-kusd-market.md`.
 
+### Operator spending controls
+
+An agent pays with a key it holds, so the person funding that key sets the bounds, and the agent
+cannot loosen them from inside a call. A `SpendPolicy` (JSON written by the operator) is enforced by
+`KusdPayer` through a `SpendLedger` (sqlite) **before any box is built or any KAS is swapped**:
+
+```python
+from k402 import KusdPayer, SpendLedger, SpendPolicy
+payer = KusdPayer(wallet, registry_url=..., network="testnet-10",
+                  policy=SpendPolicy.load("~/.kusd-market/agent-policy.json"),
+                  ledger=SpendLedger("~/.kusd-market/agent-spend.db"))
+```
+
+```json
+{"max_per_call_cents": 25, "max_total_cents": 2000,
+ "window_seconds": 3600, "max_window_cents": 200, "max_window_calls": 20,
+ "max_window_topup_cents": 100, "max_window_failures": 2,
+ "allow_capabilities": ["summarize"], "allow_payees": ["<listed provider key>"]}
+```
+
+Every field is optional (`null` = no limit on that axis). The agent's own `max_price_cents` is honoured
+only when it is tighter than `max_per_call_cents`. `max_window_topup_cents: 0` means the agent may never
+convert KAS to kUSD through the PSM; `max_window_failures` stops all payments once that many paid calls
+in the window moved money without being served; `require_listed_payee` (default on) refuses a bare
+endpoint whose quote cannot be checked against a listed key. The ledger is the memory, so a restart does
+not reset a budget, and two concurrent payments cannot both pass the same remaining cents. A refusal is
+a `SpendRefused` (a `KusdError`) with a `code`, and `pay_best` never fails over past one.
+
+The operator's CLI, which the agent never gets as a tool:
+
+```
+k402-spend --ledger ~/.kusd-market/agent-spend.db --policy ~/.kusd-market/agent-policy.json status
+k402-spend --ledger ~/.kusd-market/agent-spend.db freeze      # kill switch: every payment refused
+k402-spend --ledger ~/.kusd-market/agent-spend.db unfreeze
+k402-spend --ledger ~/.kusd-market/agent-spend.db history --limit 10
+```
+
+Design: `DESIGN-kusd-spend-controls.md`.
+
 ## Chain backends
 
 | Backend | Use | Notes |

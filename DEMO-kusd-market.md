@@ -57,3 +57,21 @@ the Rust side, pinned to each other by a shared vector.
 - Per-call kUSD costs 1.5 KAS of box KAS plus the fee per payment (the provider recovers the box KAS
   when it merges). Sub-cent streaming is for kUSD channels (design, phase 2).
 - TN10 only. Not audited. Not for real value.
+
+## Operator spending controls, live (2026-11-17)
+
+The agent (`ea592a3f…`, 26¢ kUSD) ran `examples/kusd_agent.py` under policies its operator wrote
+(`KUSD_SPEND_POLICY`), with its ledger at `~/.kusd-market/agent-spend.db`. k402 `feat/kusd-spend-controls`.
+
+| case | policy | result |
+|---|---|---|
+| over budget | `{"max_total_cents": 1}` | `refused total: 5¢ would take the lifetime total to 5¢, over the budget of 1¢` — **before any box was built**; ledger empty |
+| allowed | per call 10¢, lifetime 50¢, 5 calls/h, no PSM top-ups, 1 unserved payment/h, `summarize` only | one 5¢ box on the x402 wire, served in one attempt; status after: `total_cents 5`, `remaining.total_cents 45`, `remaining.window_calls 4` | `7e3a8db0…` |
+| kill switch | operator ran `k402-spend … freeze` | `refused frozen: the operator froze this agent's spending`; `unfreeze` lifted it |
+| capability | same policy, `--capability extract` | `refused capability: extract is not in the operator's allowed capabilities` — before discovery |
+| operator view | `k402-spend … status` / `history --limit 3` | one row: `pay`, provider `4e368c50…`, `summarize`, 5¢, `kas_sompi 160000000`, the txid, `http 200`, `sent` |
+
+The refusals cost nothing on chain; the one payment is the only row the ledger holds. Unit-tested but not
+re-run live (the live wallet had enough kUSD): the top-up bound (`max_window_topup_cents`, `0` = never
+buy), the per-window cents/calls limits, the failure stop after a `PaymentSent`, the payee allowlist, the
+8-thread "never overspend" race (`test_ledger_concurrent_reserves_never_overspend`).

@@ -57,7 +57,8 @@ it is unfrozen. A freeze is a row in the ledger, not a process restart.
 
 - Library: `KusdPayer(wallet, …, policy=None, ledger=None)`. A policy without a ledger is a
   `ValueError` (an unpersisted budget is a hole). Without a policy nothing changes.
-- CLI for the operator: `python -m k402.spend --ledger PATH [--policy PATH] status | freeze | unfreeze | history [--limit N]`.
+- CLI for the operator: `k402-spend --ledger PATH [--policy PATH] status | freeze | unfreeze | history [--limit N]`
+  (`python -m k402.spendctl …` without the console script).
   The agent never gets a tool that writes the policy or the freeze flag; that is the boundary.
 - `k402-mcp`: `pay_kusd` honours `KUSD_SPEND_POLICY` (path to the JSON file) and `KUSD_SPEND_LEDGER`
   (sqlite path, default `~/.kusd-market/spend.db`). Without a policy file the server applies a

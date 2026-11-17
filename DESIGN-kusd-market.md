@@ -201,6 +201,11 @@ and `min_settled_cents=`; ranking is per currency (§6). `k402-mcp`'s `registry_
 `k402-mcp` gains a `pay_kusd(capability, body)` tool over `KusdPayer.pay_best`, so an MCP-driven
 agent needs nothing else to take part.
 
+**Bounds set by the operator, not the agent** *(added 2026-11-17)*: `KusdPayer` takes a `SpendPolicy`
+and a `SpendLedger` (per-call ceiling, lifetime and per-window budgets, call-rate, PSM top-up cap,
+failure stop, payee/capability allowlists, kill switch), reserved before any box is built or any KAS is
+swapped; the agent's own cap can only tighten it. Design: `DESIGN-kusd-spend-controls.md`.
+
 ### 6. Reputation and the registry's own fees
 
 A verified `kusd-utxo` payment is reported to the registry as today (`POST /registry/settled`, free,
