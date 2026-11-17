@@ -25,14 +25,23 @@ async def main() -> None:
     ap.add_argument("--cents", type=int, required=True)
     ap.add_argument("--description", default="")
     ap.add_argument("--max-fee-cents", type=int, default=25)
+    ap.add_argument("--meta", default=None, help="JSON object published with the listing (input/output shape, model); "
+                                                 "default: the provider catalogue's listing_meta for a known capability")
     a = ap.parse_args()
+    if a.meta is not None:
+        meta = json.loads(a.meta)
+    else:
+        from kusd_capabilities import CAPABILITIES, listing_meta
+        meta = listing_meta(a.capability) if a.capability in CAPABILITIES else {"wires": ["x402", "k402"]}
+        if a.capability in CAPABILITIES and not a.description:
+            a.description = CAPABILITIES[a.capability].description
     w = wallet()
     priv = open(os.path.expanduser(os.environ["KUSD_KEY_FILE"])).read().strip()
     pub = payer_pubkey_from_privkey(priv)
     assert pub == w.payee_xonly(), "the listing key must be the kUSD wallet key, or payments go elsewhere"
     listing = Listing(capability=a.capability, endpoint=a.endpoint, payee_pubkey=pub, price_usd=a.cents / 100,
                       network=NETWORK, currency="kUSD", price_cents=a.cents, schemes=["kusd-utxo", "kaspa-utxo"],
-                      description=a.description, meta={"wires": ["x402", "k402"]}).sign(priv)
+                      description=a.description, meta=meta).sign(priv)
     del priv
     payer = KusdPayer(w, network=NETWORK)
     res = await payer.pay({"endpoint": f"{a.registry}/registry/list"}, json_body=listing.to_dict(), max_price_cents=a.max_fee_cents)
