@@ -70,7 +70,7 @@ class K402:
                  quote_ttl: int = 600,
                  facilitator_fee: Optional[FacilitatorFee] = None,
                  extra_offers: Optional[list[Offer]] = None,
-                 min_payable_sompi: int = MIN_PAYABLE_SOMPI,
+                 min_payable_sompi: Optional[int] = MIN_PAYABLE_SOMPI,
                  coin: Optional[str] = None, decimals: int = 8,
                  capture_baseline: bool = True,
                  evm: Optional[dict] = None,
@@ -83,7 +83,8 @@ class K402:
         self.quote_ttl = quote_ttl
         self.facilitator_fee = facilitator_fee
         self.extra_offers = extra_offers or []  # e.g. a SessionOffer
-        self.min_payable_sompi = min_payable_sompi
+        # None = "no KAS price of my own": the default floor applies to whatever KAS offer is still emitted
+        self.min_payable_sompi = MIN_PAYABLE_SOMPI if min_payable_sompi is None else int(min_payable_sompi)
         # coin set -> emit blockbook-utxo offers for that Bitcoin-family chain (Pearl, LTC, DOGE…);
         # coin None -> emit kaspa-utxo offers. Verification is identical either way.
         self.coin = coin

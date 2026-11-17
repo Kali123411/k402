@@ -274,3 +274,17 @@ def test_kusd_needs_a_daa_baseline_and_a_known_network():
     with pytest.raises(ValueError, match="network"):
         x402.network_id("testnet-11")
     assert (x402.network_id("testnet-10"), x402.network_id("mainnet")) == (x402.NETWORK_TESTNET, x402.NETWORK_MAINNET)
+
+
+@pytest.mark.asyncio
+async def test_a_kusd_only_provider_with_no_kas_floor_still_quotes():
+    # the demo registry builds its K402 with min_payable_sompi=None (it has no KAS price of its own); demanding
+    # the kUSD listing fee must then quote the default KAS floor, not crash on max(0, None) — this took the
+    # live registry down for listings on 2026-11-17
+    from k402.server import MIN_PAYABLE_SOMPI
+    k = K402(address_provider=CallbackAddressProvider(lambda pid: "kaspa:a"), backend=FakeBackend(), network="testnet-10",
+             min_payable_sompi=None, kusd=FakeWallet(), kusd_price_cents=10)
+    pr = await k.demand(0, "registry listing", cents=10)
+    kas = [o for o in pr.offers if getattr(o, "scheme", "") == "kaspa-utxo"]
+    assert kas and int(kas[0].amount_sompi) == MIN_PAYABLE_SOMPI, "the default floor stands in for a missing KAS price"
+    assert any(getattr(o, "scheme", "") == SCHEME_KUSD and o.amount_cents == "10" for o in pr.offers)

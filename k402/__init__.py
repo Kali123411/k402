@@ -25,7 +25,7 @@ from .kusd_keys import derive_payee as kusd_derive_payee, offer_tweak as kusd_of
 from .spend import SpendLedger, SpendPolicy, SpendRefused
 from .cors import allow_cors
 
-__version__ = "0.10.1"
+__version__ = "0.10.2"
 
 __all__ = [
     "K402", "Client", "PaymentRequired", "PaymentFailed",
