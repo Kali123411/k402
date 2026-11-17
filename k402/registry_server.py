@@ -77,11 +77,13 @@ def rank_key(p: dict, currency: Optional[str], oracle_price: Optional[int]) -> t
 
 def create_registry_app(backend, network: str = "mainnet", db_path: str = "registry.db",
                         listing_fee_sompi: int = 0, k402=None,
-                        kusd=None, kusd_listing_fee_cents: int = 0, oracle_price: Optional[int] = None):
+                        kusd=None, kusd_listing_fee_cents: int = 0, oracle_price: Optional[int] = None,
+                        cors_origins: Optional[list] = None):
     """Build the registry FastAPI app. `backend` is a k402 ChainBackend on `network` (used to verify
     reputation closes + stake outpoints). `network` is the kaspa SDK id ('mainnet' | 'testnet-10').
     `kusd` (a KusdWallet) verifies kUSD settled reports; `kusd_listing_fee_cents` gates kUSD listings behind
-    a kusd-utxo payment to `k402`; `oracle_price` (1e-4 USD/KAS) values KAS volume in mixed-currency rank."""
+    a kusd-utxo payment to `k402`; `oracle_price` (1e-4 USD/KAS) values KAS volume in mixed-currency rank;
+    `cors_origins` lets browser pages at those origins read the registry (see k402.cors)."""
     if kusd is not None and not oracle_price:
         raise ValueError("a registry that lists kUSD needs oracle_price (1e-4 USD per KAS) to rank KAS and kUSD volume together")
     if kusd_listing_fee_cents > 0 and k402 is None:
@@ -114,6 +116,8 @@ def create_registry_app(backend, network: str = "mainnet", db_path: str = "regis
         _c.execute("""CREATE TABLE IF NOT EXISTS settled_kusd (
             txid TEXT NOT NULL, idx INTEGER NOT NULL, payee_pubkey TEXT NOT NULL, cents INTEGER NOT NULL, t INTEGER,
             PRIMARY KEY (txid, idx))""")
+        if "capability" not in {r[1] for r in _c.execute("PRAGMA table_info(settled_kusd)")}:
+            _c.execute("ALTER TABLE settled_kusd ADD COLUMN capability TEXT NOT NULL DEFAULT ''")   # what was paid for (reported, checked against the listings)
         _c.execute("""CREATE TABLE IF NOT EXISTS reputation (
             payee_pubkey TEXT PRIMARY KEY, settled_sompi INTEGER NOT NULL DEFAULT 0,
             close_count INTEGER NOT NULL DEFAULT 0, first_settled INTEGER, last_settled INTEGER)""")
@@ -123,6 +127,9 @@ def create_registry_app(backend, network: str = "mainnet", db_path: str = "regis
             close_txid TEXT PRIMARY KEY, payee_pubkey TEXT NOT NULL, sompi INTEGER NOT NULL, t INTEGER)""")
 
     app = FastAPI(title="k402 service registry")
+    if cors_origins:
+        from .cors import allow_cors
+        allow_cors(app, cors_origins)
 
     def _rep(payee_pubkey: str) -> dict:
         with db() as c:
@@ -258,6 +265,23 @@ def create_registry_app(backend, network: str = "mainnet", db_path: str = "regis
                               "description": r.get("description", ""),
                               "listed_at": r["listed_at"]} for r in rows]}
 
+    @app.get("/registry/activity")
+    def activity(limit: int = 50):
+        """Verified kUSD settlements, newest first — the market page's live feed. `capability` is what the
+        provider reported it was paid for (checked against its listings at report time); reports from before
+        that field fall back to the payee's oldest kUSD listing, empty once delisted. The amounts are
+        chain-verified before they land here (see /registry/settled): what agents actually paid."""
+        limit = max(1, min(int(limit), 200))
+        with db() as c:
+            rows = c.execute("""SELECT s.t, s.txid, s.idx, s.payee_pubkey, s.cents,
+                                  CASE WHEN s.capability != '' THEN s.capability ELSE
+                                    COALESCE((SELECT capability FROM listings l WHERE l.payee_pubkey=s.payee_pubkey AND l.currency='kUSD'
+                                              ORDER BY l.listed_at LIMIT 1), '') END
+                                FROM settled_kusd s ORDER BY s.t DESC, s.rowid DESC LIMIT ?""", (limit,)).fetchall()
+            total = c.execute("SELECT COALESCE(SUM(cents), 0) FROM settled_kusd").fetchone()[0]
+        return {"settlements": [{"t": r[0], "txid": r[1], "idx": r[2], "payee_pubkey": r[3], "cents": r[4], "capability": r[5]} for r in rows],
+                "total_cents": int(total)}
+
     # ---------------------------------------------------------------- reputation (verified closes)
     @app.post("/registry/settled")
     async def settled(req: dict):
@@ -270,7 +294,8 @@ def create_registry_app(backend, network: str = "mainnet", db_path: str = "regis
                 cents = int(req.get("cents"))
             except (TypeError, ValueError):
                 return JSONResponse({"error": "cents must be an integer"}, status_code=400)
-            return await settled_kusd(payee_pubkey, str(req.get("txid", "")).lower(), cents, str(req.get("payment_id", "")))
+            return await settled_kusd(payee_pubkey, str(req.get("txid", "")).lower(), cents, str(req.get("payment_id", "")),
+                                      str(req.get("capability", "") or ""))
         close_txid = str(req.get("close_txid", "")).lower()
         if len(bytes.fromhex(payee_pubkey or "x")) != 32 or not close_txid:
             return JSONResponse({"error": "payee_pubkey (32-byte hex) and close_txid required"},
@@ -298,10 +323,11 @@ def create_registry_app(backend, network: str = "mainnet", db_path: str = "regis
                       (payee_pubkey, sompi, now, now))
         return {"ok": True, "credited_sompi": sompi, "reputation": _rep(payee_pubkey)}
 
-    async def settled_kusd(payee_pubkey: str, txid: str, cents: int, payment_id: str):
+    async def settled_kusd(payee_pubkey: str, txid: str, cents: int, payment_id: str, capability: str = ""):
         """A kUSD payment, verified through the wallet: the holder box of exactly `cents` created by `txid`,
         owned by the payee's listed key tweaked by the offer's `payment_id` (kusd_keys), still unspent on the
-        node — so providers report before they sweep. Credited once per box (txid, index), never per tx."""
+        node — so providers report before they sweep. Credited once per box (txid, index), never per tx.
+        `capability` (what was paid for) is the provider's word, kept only when it is one of its kUSD listings."""
         if kusd is None:
             return JSONResponse({"error": "this registry does not verify kUSD settlements"}, status_code=400)
         try:
@@ -325,7 +351,9 @@ def create_registry_app(backend, network: str = "mainnet", db_path: str = "regis
             return JSONResponse({"error": f"not a payment of this family: {r.reason}"}, status_code=409)
         now = int(time.time())
         with _lock, db() as c:
-            if c.execute("INSERT OR IGNORE INTO settled_kusd VALUES (?,?,?,?,?)", (txid, int(r.index or 0), payee_pubkey, cents, now)).rowcount == 0:
+            listed = c.execute("SELECT 1 FROM listings WHERE payee_pubkey=? AND capability=? AND currency='kUSD'", (payee_pubkey, capability)).fetchone()
+            if c.execute("INSERT OR IGNORE INTO settled_kusd (txid, idx, payee_pubkey, cents, t, capability) VALUES (?,?,?,?,?,?)",
+                         (txid, int(r.index or 0), payee_pubkey, cents, now, capability if listed else "")).rowcount == 0:
                 return {"ok": True, "already_counted": True}
             c.execute("""INSERT INTO reputation (payee_pubkey, settled_sompi, settled_cents, close_count, first_settled, last_settled)
                          VALUES (?,0,?,1,?,?)

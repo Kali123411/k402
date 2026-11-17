@@ -226,7 +226,7 @@ def test_package_exports_and_version():
     assert k402.SpendPolicy is SpendPolicy and k402.SpendLedger is SpendLedger and k402.SpendRefused is SpendRefused
     assert {"SpendPolicy", "SpendLedger", "SpendRefused"} <= set(k402.__all__)
     pyproject = pathlib.Path(k402.__file__).resolve().parents[1] / "pyproject.toml"
-    assert k402.__version__ == "0.10.0" == re.search(r'^version = "([^"]+)"', pyproject.read_text(), re.M).group(1)
+    assert k402.__version__ == "0.10.1" == re.search(r'^version = "([^"]+)"', pyproject.read_text(), re.M).group(1)
 
 
 def test_ledger_concurrent_reserves_never_overspend_across_connections(tmp_path):
