@@ -75,3 +75,8 @@ The refusals cost nothing on chain; the one payment is the only row the ledger h
 re-run live (the live wallet had enough kUSD): the top-up bound (`max_window_topup_cents`, `0` = never
 buy), the per-window cents/calls limits, the failure stop after a `PaymentSent`, the payee allowlist, the
 8-thread "never overspend" race (`test_ledger_concurrent_reserves_never_overspend`).
+
+Re-run after the review fix pass (pay reserved before any top-up; a quiet provider after the box is a
+`PaymentSent`; operator gate before the first request): same policy, one more 5¢ call served on the x402
+wire, tx `da68f255…`; status `total_cents 10`, `window.calls 2`, `remaining.total_cents 40`; history = the two
+payments and nothing else.
