@@ -321,6 +321,99 @@
      }
     }
    }
+  },
+  "/registry/submit": {
+   "post": {
+    "summary": "Submit",
+    "description": "List an x402 endpoint without a key: the registry probes it now and stores what it offered.",
+    "operationId": "submit_registry_submit_post",
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     }
+    }
+   }
+  },
+  "/registry/catalog": {
+   "get": {
+    "summary": "Catalog View",
+    "description": "Every listing class in one shape: signed (by payee key) and attested (probed), live ones unless asked.",
+    "operationId": "catalog_view_registry_catalog_get",
+    "parameters": [
+     {
+      "name": "network",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string",
+       "default": "",
+       "title": "Network"
+      }
+     },
+     {
+      "name": "include_dead",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "integer",
+       "default": 0,
+       "title": "Include Dead"
+      }
+     },
+     {
+      "name": "limit",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "integer",
+       "default": 500,
+       "title": "Limit"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/registry/reprobe": {
+   "post": {
+    "summary": "Reprobe",
+    "description": "Re-probe every attested listing now (also runs on a timer when the app was built with reprobe_seconds).",
+    "operationId": "reprobe_registry_reprobe_post",
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     }
+    }
+   }
   }
  },
  "components": {
