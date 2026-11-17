@@ -87,12 +87,16 @@ def rank_key(p: dict, currency: Optional[str], oracle_price: Optional[int]) -> t
 def create_registry_app(backend, network: str = "mainnet", db_path: str = "registry.db",
                         listing_fee_sompi: int = 0, k402=None,
                         kusd=None, kusd_listing_fee_cents: int = 0, oracle_price: Optional[int] = None,
-                        cors_origins: Optional[list] = None):
+                        cors_origins: Optional[list] = None, probe_http=None, probe_resolver=None,
+                        reprobe_seconds: int = 0):
     """Build the registry FastAPI app. `backend` is a k402 ChainBackend on `network` (used to verify
     reputation closes + stake outpoints). `network` is the kaspa SDK id ('mainnet' | 'testnet-10').
     `kusd` (a KusdWallet) verifies kUSD settled reports; `kusd_listing_fee_cents` gates kUSD listings behind
     a kusd-utxo payment to `k402`; `oracle_price` (1e-4 USD/KAS) values KAS volume in mixed-currency rank;
-    `cors_origins` lets browser pages at those origins read the registry (see k402.cors)."""
+    `cors_origins` lets browser pages at those origins read the registry (see k402.cors). Attested listings
+    (`POST /registry/submit`, see k402.catalog) are probed with `probe_http` (an httpx.AsyncClient; default: a
+    fresh one) after `probe_resolver` (host -> addresses; default: DNS) passed the public-URL guard, and
+    re-probed every `reprobe_seconds` while the app runs (0 = only on `POST /registry/reprobe`)."""
     if kusd is not None and not oracle_price:
         raise ValueError("a registry that lists kUSD needs oracle_price (1e-4 USD per KAS) to rank KAS and kUSD volume together")
     if kusd_listing_fee_cents > 0 and k402 is None:
@@ -132,6 +136,14 @@ def create_registry_app(backend, network: str = "mainnet", db_path: str = "regis
             close_count INTEGER NOT NULL DEFAULT 0, first_settled INTEGER, last_settled INTEGER)""")
         if "settled_cents" not in {r[1] for r in _c.execute("PRAGMA table_info(reputation)")}:
             _c.execute("ALTER TABLE reputation ADD COLUMN settled_cents INTEGER NOT NULL DEFAULT 0")
+        _c.execute("""CREATE TABLE IF NOT EXISTS attested (
+            endpoint TEXT NOT NULL, network TEXT NOT NULL, service_name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+            capability TEXT NOT NULL DEFAULT '', scheme TEXT NOT NULL, pay_to TEXT NOT NULL, amount_sompi INTEGER,
+            currency TEXT NOT NULL DEFAULT 'KAS', cents INTEGER, binding TEXT, profile TEXT, asset TEXT NOT NULL DEFAULT '',
+            settles TEXT NOT NULL DEFAULT 'kaspa', tags TEXT NOT NULL DEFAULT '[]', wire TEXT NOT NULL DEFAULT 'x402',
+            submitted_at INTEGER NOT NULL, probed_at INTEGER NOT NULL, latency_ms INTEGER NOT NULL DEFAULT 0,
+            live INTEGER NOT NULL DEFAULT 1, fails INTEGER NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (endpoint, network))""")
         _c.execute("""CREATE TABLE IF NOT EXISTS settled_closes (
             close_txid TEXT PRIMARY KEY, payee_pubkey TEXT NOT NULL, sompi INTEGER NOT NULL, t INTEGER)""")
 
@@ -401,6 +413,151 @@ def create_registry_app(backend, network: str = "mainnet", db_path: str = "regis
     @app.get("/", response_class=HTMLResponse)
     def ui():
         return _UI
+
+    # ---------- attested listings: the registry is the witness (k402.catalog) ----------
+    from . import catalog as _cat
+    import httpx as _httpx
+    _probe_http = probe_http or _httpx.AsyncClient()
+    _resolver = probe_resolver or _cat._default_resolver
+    _x402_network = _cat._network(network)
+    _kusd_authority = getattr(kusd, "authority", "") if kusd is not None else ""
+
+    def _attested_row_json(r: dict) -> dict:
+        return {"id": f"attested:{r['endpoint']}", "kind": "attested", "capability": r["capability"], "endpoint": r["endpoint"],
+                "serviceName": r["service_name"], "description": r["description"], "network": r["network"], "scheme": r["scheme"],
+                "currency": r["currency"], "amount_sompi": r["amount_sompi"], "price_cents": r["cents"] or 0, "pay_to": r["pay_to"],
+                "binding": r["binding"], "profile": r["profile"], "settles": r["settles"], "tags": json.loads(r["tags"]), "wire": r["wire"],
+                "verified": True, "live": bool(r["live"]), "fails": r["fails"], "last_error": r["last_error"],
+                "probed_at": r["probed_at"], "latency_ms": r["latency_ms"], "submitted_at": r["submitted_at"]}
+
+    def _attested_rows(where: str = "", args: tuple = ()) -> list:
+        with db() as c:
+            cols = [d[0] for d in c.execute("SELECT * FROM attested LIMIT 0").description]
+            return [dict(zip(cols, r)) for r in c.execute(f"SELECT * FROM attested {where}", args).fetchall()]
+
+    def _signed_row_json(r: dict) -> dict:
+        meta = json.loads(r["meta"])
+        return {"id": f"signed:{r['payee_pubkey']}:{r['capability']}", "kind": "signed", "capability": r["capability"],
+                "endpoint": r["endpoint"], "serviceName": meta.get("provider") or r["capability"], "description": r.get("description", ""),
+                "network": _cat._network(r["network"]), "scheme": "exact", "schemes": json.loads(r["schemes"]),
+                "currency": r.get("currency", "KAS"), "amount_sompi": None, "price_usd": r["price_usd"], "price_cents": r.get("price_cents", 0),
+                "payee_pubkey": r["payee_pubkey"], "pay_to": None, "meta": meta, "reputation": _rep(r["payee_pubkey"]),
+                "verified": True, "live": True, "listed_at": r["listed_at"]}
+
+    @app.post("/registry/submit")
+    async def submit(request: Request):
+        """List an x402 endpoint without a key: the registry probes it now and stores what it offered."""
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ValueError("body must be an object")
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": f"bad body: {e}"}, status_code=400)
+        endpoint = str(body.get("resource") or body.get("endpoint") or "").strip()
+        name = str(body.get("serviceName") or body.get("service_name") or "").strip()
+        if not endpoint or not name:
+            return JSONResponse({"ok": False, "error": "resource (the endpoint URL) and serviceName are required"}, status_code=400)
+        try:
+            endpoint = _cat.assert_public_url(endpoint, resolver=_resolver)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": f"resource URL: {e}"}, status_code=400)
+        att = await _cat.probe(endpoint, _probe_http, kusd_authority=_kusd_authority)
+        if not att.ok:
+            return JSONResponse({"ok": False, "error": att.error, "attestation": att.to_dict()}, status_code=400)
+        declared = {"scheme": body.get("scheme"), "network": body.get("network"), "pay_to": body.get("payTo") or body.get("pay_to"),
+                    "amount_sompi": body.get("amountSompi", body.get("amount_sompi"))}
+        try:
+            terms = _cat.reconcile(declared, att)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": f"listing does not match the live service: {e}", "attestation": att.to_dict()}, status_code=400)
+        if not _cat.meets_floor(terms):
+            return JSONResponse({"ok": False, "error": f"price {(terms.get('amount_sompi') or 0) / 1e8:g} KAS is below the "
+                                                      f"{_cat.MIN_AMOUNT_SOMPI / 1e8:g} KAS marketplace minimum"}, status_code=400)
+        settles = "base" if str(body.get("kind", "")).lower() == "base" else "kaspa"
+        tags = [str(t)[:32] for t in (body.get("tags") or []) if isinstance(t, (str, int))][:12]
+        now = int(time.time())
+        with _lock, db() as c:
+            c.execute("INSERT OR REPLACE INTO attested (endpoint, network, service_name, description, capability, scheme, pay_to, "
+                      "amount_sompi, currency, cents, binding, profile, asset, settles, tags, wire, submitted_at, probed_at, latency_ms, live, fails, last_error) "
+                      "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,0,'')",
+                      (endpoint, terms["network"], name[:120], str(body.get("description") or "")[:2000], str(body.get("capability") or "")[:64],
+                       terms["scheme"], terms["pay_to"], terms["amount_sompi"], terms["currency"], terms["cents"], terms["binding"], terms["profile"],
+                       terms["asset"], settles, json.dumps(tags), att.wire, now, att.probed_at, att.latency_ms))
+        row = _attested_rows("WHERE endpoint=? AND network=?", (endpoint, terms["network"]))[0]
+        return {"ok": True, "listing": _attested_row_json(row), "attestation": att.to_dict()}
+
+    @app.get("/registry/catalog")
+    def catalog_view(network: str = "", include_dead: int = 0, limit: int = 500):
+        """Every listing class in one shape: signed (by payee key) and attested (probed), live ones unless asked."""
+        want = _cat._network(network) if network else ""
+        out = []
+        with db() as c:
+            cols = [d[0] for d in c.execute("SELECT * FROM listings LIMIT 0").description]
+            signed = [dict(zip(cols, r)) for r in c.execute("SELECT * FROM listings").fetchall()]
+        for r in signed:
+            j = _signed_row_json(r)
+            if not want or j["network"] == want:
+                out.append(j)
+        for r in _attested_rows("WHERE (? = '' OR network = ?)", (want, want)):
+            if include_dead or r["live"]:
+                out.append(_attested_row_json(r))
+        out.sort(key=lambda x: (0 if x["kind"] == "signed" else 1, -(x.get("reputation") or {}).get("settled_cents", 0), x["endpoint"]))
+        return {"count": len(out), "listings": out[:limit], "network": want or None, "generated_at": int(time.time())}
+
+    async def reprobe_all() -> dict:
+        rows = _attested_rows()
+        summary = {"probed": 0, "live": 0, "retired": 0, "revived": 0}
+        for r in rows:
+            att = await _cat.probe(r["endpoint"], _probe_http, kusd_authority=_kusd_authority)
+            summary["probed"] += 1
+            with _lock, db() as c:
+                if att.ok:
+                    try:
+                        terms = _cat.reconcile({"scheme": r["scheme"], "network": r["network"]}, att)
+                    except ValueError as e:
+                        att.ok, att.error = False, str(e)
+                if att.ok:
+                    if not r["live"]:
+                        summary["revived"] += 1
+                    summary["live"] += 1
+                    c.execute("UPDATE attested SET live=1, fails=0, last_error='', probed_at=?, latency_ms=?, pay_to=?, amount_sompi=?, cents=?, "
+                              "binding=?, profile=?, asset=?, wire=? WHERE endpoint=? AND network=?",
+                              (att.probed_at, att.latency_ms, terms["pay_to"], terms["amount_sompi"], terms["cents"], terms["binding"], terms["profile"],
+                               terms["asset"], att.wire, r["endpoint"], r["network"]))
+                else:
+                    fails = r["fails"] + 1
+                    live = 1 if fails < _cat.DEAD_AFTER else 0
+                    if r["live"] and not live:
+                        summary["retired"] += 1
+                    c.execute("UPDATE attested SET live=?, fails=?, last_error=?, probed_at=? WHERE endpoint=? AND network=?",
+                              (live, fails, att.error[:300], att.probed_at, r["endpoint"], r["network"]))
+        return summary
+
+    @app.post("/registry/reprobe")
+    async def reprobe():
+        """Re-probe every attested listing now (also runs on a timer when the app was built with reprobe_seconds)."""
+        return await reprobe_all()
+
+    if reprobe_seconds > 0:
+        async def _reprobe_loop():
+            while True:
+                await asyncio.sleep(reprobe_seconds)
+                try:
+                    await reprobe_all()
+                except Exception:   # a failed sweep must not kill the loop; the next one runs
+                    pass
+
+        import contextlib
+
+        @contextlib.asynccontextmanager
+        async def _lifespan(_app):
+            task = asyncio.create_task(_reprobe_loop())
+            try:
+                yield
+            finally:
+                task.cancel()
+
+        app.router.lifespan_context = _lifespan
 
     return app
 

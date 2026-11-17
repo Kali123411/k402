@@ -21,5 +21,6 @@ be = backend()
 k402 = k402_for(w, be, kusd_price_cents=FEE_CENTS)
 app = create_registry_app(be, network=NETWORK, db_path=DB, k402=k402, kusd=w, kusd_listing_fee_cents=FEE_CENTS,
                           oracle_price=int(os.environ.get("ORACLE_PRICE", "268")),
-                          cors_origins=origins_from_env(os.environ.get("CORS_ORIGINS")))
+                          cors_origins=origins_from_env(os.environ.get("CORS_ORIGINS")),
+                          reprobe_seconds=int(os.environ.get("REPROBE_SECONDS", "21600")))   # attested listings re-probed every 6 h
 k402.install(app)
