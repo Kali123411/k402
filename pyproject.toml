@@ -1,6 +1,6 @@
 [project]
 name = "k402"
-version = "0.9.0"
+version = "0.10.0"
 description = "k402 — HTTP 402 payments on Kaspa and Bitcoin-family UTXO chains. Protocol library: client, server middleware, and PNN-backed verification. No accounts, no API keys."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -19,6 +19,9 @@ kaspa = ["kaspa>=2.0"]
 btc = ["bip-utils>=2.9"]
 server = ["fastapi>=0.110"]
 all = ["kaspa>=2.0", "bip-utils>=2.9", "fastapi>=0.110"]
+
+[project.scripts]
+k402-spend = "k402.spend:main"   # the operator's spending controls for a kUSD agent (status / freeze / unfreeze / history)
 
 [project.urls]
 Homepage = "https://github.com/Kali123411/k402"

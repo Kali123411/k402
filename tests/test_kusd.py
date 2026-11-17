@@ -5,7 +5,7 @@ import stat
 
 import pytest
 
-from k402.kusd import Family, KusdError, KusdWallet, VerifyResult
+from k402.kusd import Family, KusdError, KusdNotRun, KusdWallet, VerifyResult
 
 FAKE = os.path.join(os.path.dirname(__file__), "fake_kusd_pay.py")
 AUTH = "06" * 32
@@ -52,9 +52,14 @@ def test_wallet_parses_bin_json(tmp_path, monkeypatch):
 
 def test_wallet_refuses_key_file_not_600(tmp_path, monkeypatch):
     w = wallet(tmp_path, {"balance": {}}, mode=0o644, monkeypatch=monkeypatch)
-    with pytest.raises(KusdError, match="600"):
+    with pytest.raises(KusdNotRun, match="600"):   # KusdNotRun: the binary was never invoked (a payer may void its reservation)
         w.balance()
     assert not (tmp_path / "log").exists(), "the binary must not even be invoked"
+    with pytest.raises(KusdNotRun, match="not found"):
+        mk(key_file=str(tmp_path / "nope.key")).balance()
+    with pytest.raises(KusdNotRun, match="could not run"):
+        mk(bin_path=str(tmp_path / "no-such-binary"), key_file=keyfile(tmp_path)).family()
+    assert issubclass(KusdNotRun, KusdError)
 
 
 def test_verify_result_retryable_when_not_indexed(tmp_path, monkeypatch):
