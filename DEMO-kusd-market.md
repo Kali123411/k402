@@ -7,6 +7,13 @@ Everything below ran against the live kUSD family on Kaspa testnet-10 (authority
 `summarize` for 5¢ of kUSD a call, llama3.1 8B behind it). Keys: three fresh wallets (registry, provider,
 agent), mode 600, funded with TKAS from the deploy key (`91f6b2fd…`, `eb03087f…`, `e92b4be2…`).
 
+> **2026-11-18 — Stage 2c re-genesis.** The kUSD oracle gained the miner bound (kusd-framework, oracle Stage 2c), which
+> re-created the TN10 family: the market now runs on authority `ad21c4394bc67de68118326a3513b29c1a5395d03fc0d2a666cb7a61078a9c77`
+> (relay pins and `KUSD_AUTHORITY` in both env files updated, services restarted). The provider and agent wallets were
+> re-funded from the new PSM (`d47ec93b…`, `6fe86fe8…`) and the five services re-listed with their 10¢ kUSD fees:
+> summarize `28edfc92…`, embed `7816b8e4…`, translate `9efc7169…`, review `0d1afc4b…`, extract `f0f1d56e…`. Everything
+> below this line is the proof record of the previous family (authority `06b75320…`) and stays as evidence.
+
 ## The loop
 
 | step | who | what | on chain |
